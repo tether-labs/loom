@@ -17,10 +17,6 @@ const KQueue = @import("KQueue.zig");
 const Stack = @import("async/types.zig").Stack;
 const Fiber = @import("async/Fiber.zig");
 const createFiber = Scheduler.createFiber;
-const process = @import("../handler.zig").handle;
-const Context = @import("../context.zig");
-const Tether = @import("../server.zig");
-const dom = @import("../core/simdjson/dom.zig");
 const Io = @import("Io.zig");
 
 // EVFILT_READ
@@ -108,8 +104,8 @@ const Io = @import("Io.zig");
 const READ_TIMEOUT_MS = 60_000;
 // const READ_TIMEOUT_MS = 0;
 
-const ClientList = std.DoublyLinkedList(*Client);
-const ClientNode = ClientList.Node;
+const ClientList = Client.ClientList;
+const ClientNode = Client.ClientNode;
 pub var logger: Logger = undefined;
 pub var loom_engine: Scheduler = undefined;
 
@@ -135,12 +131,12 @@ read_timeout_list: ClientList = undefined,
 
 // for creating client
 client_pool: std.heap.MemoryPool(Client) = undefined,
-context_pool: std.heap.MemoryPool(Context) = undefined,
 // for creating nodes for our read_timeout list
-client_node_pool: std.heap.MemoryPool(ClientList.Node) = undefined,
+client_node_pool: std.heap.MemoryPool(ClientNode) = undefined,
 fiber: FiberGen = undefined,
 scheduler: Scheduler = undefined,
 stack: Stack = undefined,
+max_body_size: usize,
 
 pub const Config = struct {
     server_addr: []const u8 = "0.0.0.0",
@@ -148,11 +144,32 @@ pub const Config = struct {
     sticky_server: bool = false,
     max: usize = 256,
     max_body_size: usize = 4 * 1024 * 1024,
+    max_read_size: usize = 2097152,
+    callback: *const fn (*Client, []const u8) anyerror!void,
 };
+
+const resp = "HTTP/1.1 200 OK\r\nDate: Tue, 19 Aug 2025 18:37:36 GMT\r\nContent-Length: 1000000\r\nContent-Type: text/plain charset=utf-8\r\n\r\n";
+var payload: []u8 = undefined;
+var allocator = std.heap.page_allocator;
+fn handle(client: *Client, _: []const u8) !void {
+    try client.fillWriteBuffer(payload);
+    _ = try client.writeMessage();
+    xsuspend();
+}
+
+pub fn makePayload(size: usize) ![]u8 {
+    const buf = try allocator.alloc(u8, size);
+    @memset(buf, 'x');
+    return buf;
+}
 
 /// This is the Cors struct default set to null
 const FiberGen = Signature.fromFunc(listen, .{ .YieldT = *Conn, .InjectT = *Conn });
 pub fn new(target: *Loom, config: Config, arena: *Allocator, id: usize) !void {
+    payload = try arena.alloc(u8, (resp.len + 1000000));
+    @memcpy(payload[0..resp.len], resp);
+    @memcpy(payload[resp.len..(resp.len + 1000000)], try makePayload(1000000));
+    // payload = try makePayload(800000);
     var scheduler: Scheduler = undefined;
     try scheduler.init(arena.*);
     loom_engine = scheduler;
@@ -165,7 +182,7 @@ pub fn new(target: *Loom, config: Config, arena: *Allocator, id: usize) !void {
 
     const stacks = try arena.alloc(Stack, config.max);
     for (0..config.max) |i| {
-        stacks[i] = try scheduler.stackAlloc(1024 * 128);
+        stacks[i] = try scheduler.stackAlloc(1024 * 1024 * 2);
     }
 
     logger.init();
@@ -177,13 +194,19 @@ pub fn new(target: *Loom, config: Config, arena: *Allocator, id: usize) !void {
         .connected = 0,
         .read_timeout_list = .{},
         .client_pool = std.heap.MemoryPool(Client).init(arena.*),
-        .context_pool = std.heap.MemoryPool(Context).init(arena.*),
         .client_node_pool = std.heap.MemoryPool(ClientNode).init(arena.*),
         .scheduler = scheduler,
         .kqueue = kqueue,
         .stacks = stacks,
         .io = io,
+        .max_body_size = config.max_body_size,
     };
+
+    Client.writer_buf = try allocator.alloc(u8, config.max_body_size);
+    Client.reader_buf = try allocator.alloc(u8, config.max_read_size);
+    print("Max body size: {}\n", .{config.max_body_size});
+    print("Max read size: {}\n", .{config.max_read_size});
+    errdefer allocator.free(Client.writer_buf);
 }
 
 pub fn deinit(self: *Loom) void {
@@ -191,6 +214,7 @@ pub fn deinit(self: *Loom) void {
     self.client_pool.deinit();
     self.client_node_pool.deinit();
     self.arena.free(self.stack);
+    self.arena.free(Client.writer_buf);
 }
 
 pub fn createListener(loom: *Loom) !c_int {
@@ -236,19 +260,16 @@ pub fn accept(self: *Loom) ?*Conn {
 ///
 /// # Returns:
 /// !void.
-pub fn listen(t: *Tether, loom: *Loom, ctx: *Context) !void {
+pub fn listen(loom: *Loom) !void {
     const listener = loom.createListener() catch return;
     // Verify unique resources
     // std.debug.assert(loom.kqueue.kfd == kqueue.kfd);
-    try run(t, loom, listener, ctx);
+    try run(loom, listener);
 }
 
-const resp = "HTTP/1.1 200 OK\r\nDate: Tue, 19 Aug 2025 18:37:36 GMT\r\nContent-Length: 7\r\nContent-Type: text/plain charset=utf-8\r\n\r\nSUCCESS";
 fn run(
-    _: *Tether,
     loom: *Loom,
     listener: posix.socket_t,
-    ctx: *Context,
 ) !void {
     while (true) {
         // const next_timeout = loom.enforceTimeout();
@@ -257,14 +278,6 @@ fn run(
             // ready is type kevent
             // udata is the client conn value
             switch (ready.udata) {
-                // 0 is the listener socket so here if we receive a notification
-                // from the listener socket then we need to accept a new conn and add it to the kqueue
-                // else we are reading a new conn
-                // 0 => loom.acceptConn(listener) catch |err| log.err(
-                //     "failed to accept: {}",
-                //     .{err},
-                // ),
-                //
                 0 => {
                     while (true) {
                         loom.acceptConn(listener) catch |err| switch (err) {
@@ -296,39 +309,16 @@ fn run(
                             // client.read_timeout = std.time.milliTimestamp() + READ_TIMEOUT_MS;
                             // read_timeout_list.remove(client.read_timeout_node);
                             // read_timeout_list.append(client.read_timeout_node);
-
-                            client.fiber = try createFiber(process, .{ client, msg, ctx }, loom.stacks[loom.connected - 1]);
-                            xresume(client.fiber);
-                            // try process(client, msg, ctx);
-
-                            // const job_context = try loom.context_pool.create();
-                            // job_context.* = try Context.init(
-                            //     loom.arena,
-                            //     "",
-                            //     "",
-                            //     null,
-                            //     null,
-                            //     "",
-                            //     null,
-                            // );
-                            // const node = try loom.scheduler.atm_pool.generateJobWithCtx(process, .{ client, msg });
-                            // try loom.scheduler.atm_pool.dispatchJob(node);
-                            // if (!accept_) {
-                            //     print("Loop Id: {any}\n", .{ctx.id});
-                            //     print("Loop kfd: {any}\n", .{loom.kqueue.kfd});
-                            //     print("Loop Listener: {any}\n", .{listener});
-                            //     accept_ = true;
-                            // }
-
-                            // try test_thread(client);
-                            // _ = posix.write(client.socket, resp) catch |err| {
-                            //     print("Write Error: {any}\n", .{err});
-                            // };
+                            client.fiber = try createFiber(handle, .{ client, msg }, loom.stacks[loom.connected - 1]);
+                            xresume(client.fiber.?);
                         }
                     } else if (filter == system.EVFILT.WRITE) {
                         // If we couldn't write for some reason initially then
                         // when we receive a write event we write to the client
-                        loom.closeClient(client);
+                        _ = client.writeMessage() catch {
+                            // std.debug.print("Write error: {}\n", .{err});
+                            loom.closeClient(client);
+                        };
                     }
                 },
             }
@@ -374,7 +364,7 @@ pub fn acceptConn(self: *Loom, listener: posix.socket_t) !void {
             else => return err,
         };
 
-        const client = try self.client_pool.create();
+        const client: *Client = try self.client_pool.create();
         errdefer self.client_pool.destroy(client);
         client.* = Client.init(self.arena.*, socket, address, &self.kqueue) catch |err| {
             posix.close(socket);
@@ -387,13 +377,12 @@ pub fn acceptConn(self: *Loom, listener: posix.socket_t) !void {
         client.read_timeout_node = try self.client_node_pool.create();
         errdefer self.client_node_pool.destroy(client.read_timeout_node);
 
-        client.read_timeout_node.* = .{
-            .next = null,
-            .prev = null,
+        client.read_timeout_node.* = ClientNode{
+            .node = .{},
             .data = client,
         };
 
-        self.read_timeout_list.append(client.read_timeout_node);
+        // self.read_timeout_list.append(&client.read_timeout_node.node);
         try self.kqueue.newClient(client);
         self.connected += 1;
     } else {
@@ -408,7 +397,7 @@ pub fn readEvents(loom: *Loom, next_timeout: i32) ![]system.Kevent {
 }
 
 pub fn closeClient(self: *Loom, client: *Client) void {
-    self.read_timeout_list.remove(client.read_timeout_node);
+    self.read_timeout_list.remove(&client.read_timeout_node.node);
     self.client_node_pool.destroy(client.read_timeout_node);
     client.deinit(self.arena.*);
     posix.close(client.socket);

@@ -5,15 +5,18 @@ const KQueue = @import("KQueue.zig");
 const Loom = @import("Loom.zig");
 const Fiber = @import("async/Fiber.zig");
 
-const ClientList = std.DoublyLinkedList(*Client);
-const ClientNode = ClientList.Node;
+pub const ClientList = std.DoublyLinkedList;
+pub const ClientNode = struct {
+    node: ClientList.Node,
+    data: *Client,
+};
 
 pub const Client = @This();
 kqueue: *KQueue,
 
 socket: posix.socket_t,
 address: std.net.Address,
-fiber: *Fiber = undefined,
+fiber: ?*Fiber = null,
 
 // Used to read length-prefixed messages
 msg: []const u8,
@@ -131,8 +134,8 @@ pub fn findCRLFCRLF(payload: []const u8) ?usize {
     return null;
 }
 
-pub var reader_buf: [2097152]u8 = [_]u8{0} ** 2097152;
-// pub var reader_buf: []u8 = undefined;
+// pub var reader_buf: [2097152]u8 = [_]u8{0} ** 2097152;
+pub var reader_buf: []u8 = undefined;
 pub fn readMessage(self: *Client) ![]const u8 {
     // return self.reader.readMessage(self.socket) catch |err| {
     //     // try Loom.logger.err("Read msg {any}", .{err}, @src());
@@ -142,7 +145,7 @@ pub fn readMessage(self: *Client) ![]const u8 {
     //     }
     // };
 
-    const rv = try posix.read(self.socket, &reader_buf);
+    const rv = try posix.read(self.socket, reader_buf);
     if (rv == 0) {
         return error.Closed;
     }
@@ -158,7 +161,7 @@ pub fn readMessage(self: *Client) ![]const u8 {
     return reader_buf[0..rv];
 }
 
-pub fn writeMessage(self: *Client, _: []const u8) !?void {
+pub fn writeMessage(self: *Client) !?void {
     return self.writer.writeMessage(self.socket) catch |err| {
         switch (err) {
             error.WouldBlock => {
@@ -175,33 +178,6 @@ pub fn fillWriteBuffer(self: *Client, msg: []const u8) !void {
         try Loom.logger.err("Fill write buffer {any}", .{err}, @src());
         return error.FailedToFillClientBuf;
     };
-}
-
-pub fn handle(client: *Client) !void {
-    while (true) {
-        const msg = client.readMessage() catch |err| {
-            switch (err) {
-                error.WouldBlock => {
-                    break;
-                },
-                else => {
-                    posix.close(client.socket);
-                    // loom.closeClient(client);
-                    break;
-                },
-            }
-        };
-
-        client.fillWriteBuffer(msg) catch |err| {
-            std.debug.print("Fill Error: {any}\n", .{err});
-        };
-        _ = client.writeMessage() catch |err| {
-            std.debug.print("Write Error: {any}\n", .{err});
-            // loom.closeClient(client);
-            posix.close(client.socket);
-            break;
-        };
-    }
 }
 
 const Reader = struct {
@@ -241,18 +217,21 @@ const Reader = struct {
     }
 };
 
-var writer_buf: [4096]u8 = [_]u8{0} ** 4096;
+// var writer_buf: [4096*50]u8 = [_]u8{0} ** (4096 * 50);
+pub var writer_buf: []u8 = undefined;
 const Writer = struct {
     buf: []u8,
     pos: usize = 0,
     start: usize = 0,
+    offset: usize = 0,
 
     pub fn init(_: Allocator, _: usize) !Writer {
         // const buf = try arena.alloc(u8, size);
         return .{
-            .buf = &writer_buf,
+            .buf = writer_buf,
             .pos = 0,
             .start = 0,
+            .offset = 0,
         };
     }
 
@@ -268,11 +247,12 @@ const Writer = struct {
     }
 
     pub fn writeMessage(self: *Writer, socket: posix.socket_t) !void {
+        std.log.debug("Writing\n", .{  });
         var buf = self.buf;
-        const pos = self.pos;
+        const end = self.pos;
         const start = self.start;
-        std.debug.assert(pos >= start);
-        const wv = posix.write(socket, buf[0..pos]) catch |err| {
+        std.debug.assert(end >= start);
+        const wv = posix.write(socket, buf[self.offset..end]) catch |err| {
             switch (err) {
                 error.WouldBlock => return error.WouldBlock,
                 else => return err,
@@ -281,10 +261,23 @@ const Writer = struct {
         if (wv == 0) {
             return error.Closed;
         }
-        std.log.debug("{any} {any}\n", .{ self.start, self.pos });
+
+        std.log.debug("Amount written: {}\n", .{wv});
+        // This means we havent written all the data yet
+        self.offset += wv;
+        if (end > self.offset) {
+            std.log.debug("Offset {any} End: {any}\n", .{ self.offset, end });
+            return error.WouldBlock;
+        } else {
+            std.log.debug("Closed \n", .{});
+            self.offset = 0;
+            self.pos = 0;
+            self.start = 0;
+        }
+
         // self.pos = pos + wv;
-        self.start = 0;
-        self.pos = 0;
+        // self.start = 0;
+        // self.pos = 0;
         // self.buf = undefined;
     }
 };

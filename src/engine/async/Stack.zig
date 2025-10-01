@@ -28,7 +28,7 @@ pub fn push(self: *@This(), comptime T: type) !*T {
     const ptr_i = std.mem.alignBackward(
         usize,
         @intFromPtr(self.sp - @sizeOf(T)),
-        stack_alignment,
+        stack_alignment.toByteUnits(),
     );
     // We check the ptr_index is greater than the stack.full
     // if it is less than then the stack is too small

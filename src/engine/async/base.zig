@@ -33,7 +33,7 @@ const arch_info: ArchInfo = switch (builtin.cpu.arch) {
     else => @compileError("Unsupported cpu architecture"),
 };
 
-pub const stack_alignment = 16;
+pub const stack_alignment = std.mem.Alignment.@"16";
 
 // This x0 and x1
 extern fn asm_stack_swap(current: *Frame, target: *Frame) void;
@@ -48,7 +48,7 @@ pub const Frame = packed struct {
     const Func = *const fn (
         from: *Frame,
         self: *Frame,
-    ) callconv(.C) noreturn;
+    ) callconv(.c) noreturn;
 
     // This Function takes a func and a stack
     // we check that the Func is u8
@@ -57,7 +57,7 @@ pub const Frame = packed struct {
     // one of these registers is 19 the instruction ptr
     // program counter
     // we load the stack then we jump to the lr program counter and set out func to it
-    pub fn init(func: Func, stack: []align(stack_alignment) u8) !Self {
+    pub fn init(func: Func, stack: []align(stack_alignment.toByteUnits()) u8) !Self {
         if (@sizeOf(usize) != 8) @compileError("usize expected to take 8 bytes");
         if (@sizeOf(*Func) != 8) @compileError("function pointer expected to take 8 bytes");
         // We create the number of bytes needed for the stack

@@ -1,27 +1,21 @@
 const std = @import("std");
-const loom = @import("loom");
+const lib = @import("loom");
+
+// fn handle(client: *lib.Client, msg: []const u8) !void {
+//     std.debug.print("Message: {s}\n", .{msg});
+// }
 
 pub fn main() !void {
-    // Prints to stderr, ignoring potential errors.
-    std.debug.print("All your {s} are belong to us.\n", .{"codebase"});
-    try loom.bufferedPrint();
-}
-
-test "simple test" {
-    const gpa = std.testing.allocator;
-    var list: std.ArrayList(i32) = .empty;
-    defer list.deinit(gpa); // Try commenting this out and see if zig detects the memory leak!
-    try list.append(gpa, 42);
-    try std.testing.expectEqual(@as(i32, 42), list.pop());
-}
-
-test "fuzz example" {
-    const Context = struct {
-        fn testOne(context: @This(), input: []const u8) anyerror!void {
-            _ = context;
-            // Try passing `--fuzz` to `zig build test` and see if it manages to fail this test case!
-            try std.testing.expect(!std.mem.eql(u8, "canyoufindme", input));
-        }
+    var allocator = std.heap.page_allocator;
+    const config = lib.Loom.Config{
+        .server_addr = "0.0.0.0",
+        .server_port = 8080,
+        .sticky_server = false,
+        .max = 256,
+        .max_body_size = 4 * 1024 * 1024,
+        .callback = undefined,
     };
-    try std.testing.fuzz(Context{}, Context.testOne, .{});
+    var loom: lib.Loom = undefined;
+    try loom.new(config, &allocator, 0);
+    try loom.listen();
 }

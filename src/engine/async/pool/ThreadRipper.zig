@@ -3,7 +3,7 @@ const print = std.debug.print;
 const builtin = @import("builtin");
 const Atomic = std.atomic.Value;
 const assert = std.debug.assert;
-const Context = @import("../../../context.zig");
+// const Context = @import("../../../context.zig");
 
 // This is the ThreadRipper
 const ThreadRipper = @This();
@@ -19,7 +19,7 @@ threads_stack: Atomic(?*Thread) = Atomic(?*Thread).init(null),
 threads_stack_ctx: Atomic(?*Thread_Ctx) = Atomic(?*Thread_Ctx).init(null),
 idle_event: Event = .{},
 join_event: Event = .{},
-ctxs: []*Context = undefined,
+// ctxs: []*Context = undefined,
 
 const TRError = error{
     FailedToInitThreadRipper,
@@ -40,7 +40,7 @@ pub const ActionList = struct {
     tail: *Node,
 };
 
-const ActionProto = *const fn (*Action, ?*Context) anyerror!void;
+const ActionProto = *const fn (*Action) anyerror!void;
 
 pub const Node = struct {
     id: u32 = 0,
@@ -93,30 +93,30 @@ pub fn deinit(tr: *ThreadRipper) void {
     tr.* = undefined;
 }
 
-pub fn warm_with_ctx(tr: *ThreadRipper, ctxs: []*Context) void {
-    var sync = @as(Sync, @bitCast(tr.sync.load(.monotonic)));
-    var new_sync = sync;
-
-    var thread_count: u14 = 0;
-    for (0..tr.max_threads) |i| {
-        thread_count += 1;
-        const spawn_config = std.Thread.SpawnConfig{ .stack_size = tr.stack_size };
-        const thread = std.Thread.spawn(spawn_config, Thread_Ctx.worker, .{ tr, i }) catch return tr.unregister_ctx(null);
-        thread.detach();
-    }
-
-    new_sync.spawned_threads = thread_count;
-    tr.ctxs = ctxs;
-
-    while (true) {
-        sync = @as(Sync, @bitCast(tr.sync.cmpxchgWeak(
-            @as(u32, @bitCast(sync)),
-            @as(u32, @bitCast(new_sync)),
-            .release,
-            .monotonic,
-        ) orelse break));
-    }
-}
+// pub fn warm_with_ctx(tr: *ThreadRipper, ctxs: []*Context) void {
+//     var sync = @as(Sync, @bitCast(tr.sync.load(.monotonic)));
+//     var new_sync = sync;
+//
+//     var thread_count: u14 = 0;
+//     for (0..tr.max_threads) |i| {
+//         thread_count += 1;
+//         const spawn_config = std.Thread.SpawnConfig{ .stack_size = tr.stack_size };
+//         const thread = std.Thread.spawn(spawn_config, Thread_Ctx.worker, .{ tr, i }) catch return tr.unregister_ctx(null);
+//         thread.detach();
+//     }
+//
+//     new_sync.spawned_threads = thread_count;
+//     tr.ctxs = ctxs;
+//
+//     while (true) {
+//         sync = @as(Sync, @bitCast(tr.sync.cmpxchgWeak(
+//             @as(u32, @bitCast(sync)),
+//             @as(u32, @bitCast(new_sync)),
+//             .release,
+//             .monotonic,
+//         ) orelse break));
+//     }
+// }
 
 pub fn warm(tr: *ThreadRipper) void {
     var sync = @as(Sync, @bitCast(tr.sync.load(.monotonic)));
@@ -142,10 +142,10 @@ pub fn warm(tr: *ThreadRipper) void {
     }
 }
 
-pub fn generateJobWithCtx(tr: *ThreadRipper, comptime func: anytype, args: anytype) !*Node {
-    const job_node = try tr.createNodeWithCtx(func, args);
-    return job_node;
-}
+// pub fn generateJobWithCtx(tr: *ThreadRipper, comptime func: anytype, args: anytype) !*Node {
+//     const job_node = try tr.createNodeWithCtx(func, args);
+//     return job_node;
+// }
 
 pub fn generateJob(tr: *ThreadRipper, comptime func: anytype, args: anytype) !*Node {
     const job_node = try tr.createNode(func, args);
@@ -308,92 +308,92 @@ pub const GateKeeper = struct {
     }
 };
 
-/// Fork is the call function to start a function call
-/// This is used in conjunction withGateKeeper
-pub fn fork(
-    tr: *ThreadRipper,
-    gk: *GateKeeper,
-    comptime func: anytype,
-    args: anytype,
-) !void {
-    if (builtin.single_threaded) {
-        try @call(.auto, func, args);
-        return;
-    }
-
-    const Args = @TypeOf(args);
-
-    const Runnable = struct {
-        args: Args,
-        tr: *ThreadRipper,
-        gk: *GateKeeper,
-        run_node: Node = .{ .data = .{ .runFn = runFn } },
-
-        fn runFn(action: *Action, _: ?*Context) !void {
-            const run_node: *Node = @fieldParentPtr("data", action);
-            const runnable: *@This() = @alignCast(@fieldParentPtr("run_node", run_node));
-            try @call(.auto, func, runnable.args);
-
-            runnable.gk.decr();
-            runnable.tr.arena.destroy(runnable);
-        }
-    };
-
-    const runnable = try tr.arena.create(Runnable);
-    runnable.* = .{
-        .args = args,
-        .tr = tr,
-        .gk = gk,
-    };
-    if (gk.count.load(.monotonic) == 0) {
-        gk.action_list.tail = &runnable.run_node;
-    }
-    runnable.run_node.id = gk.incr();
-
-    runnable.run_node.next = gk.action_list.head;
-    gk.action_list.head = &runnable.run_node;
-}
+// /// Fork is the call function to start a function call
+// /// This is used in conjunction withGateKeeper
+// pub fn fork(
+//     tr: *ThreadRipper,
+//     gk: *GateKeeper,
+//     comptime func: anytype,
+//     args: anytype,
+// ) !void {
+//     if (builtin.single_threaded) {
+//         try @call(.auto, func, args);
+//         return;
+//     }
+//
+//     const Args = @TypeOf(args);
+//
+//     const Runnable = struct {
+//         args: Args,
+//         tr: *ThreadRipper,
+//         gk: *GateKeeper,
+//         run_node: Node = .{ .data = .{ .runFn = runFn } },
+//
+//         fn runFn(action: *Action, _: ?*Context) !void {
+//             const run_node: *Node = @fieldParentPtr("data", action);
+//             const runnable: *@This() = @alignCast(@fieldParentPtr("run_node", run_node));
+//             try @call(.auto, func, runnable.args);
+//
+//             runnable.gk.decr();
+//             runnable.tr.arena.destroy(runnable);
+//         }
+//     };
+//
+//     const runnable = try tr.arena.create(Runnable);
+//     runnable.* = .{
+//         .args = args,
+//         .tr = tr,
+//         .gk = gk,
+//     };
+//     if (gk.count.load(.monotonic) == 0) {
+//         gk.action_list.tail = &runnable.run_node;
+//     }
+//     runnable.run_node.id = gk.incr();
+//
+//     runnable.run_node.next = gk.action_list.head;
+//     gk.action_list.head = &runnable.run_node;
+// }
 
 pub fn waitAndWork(tr: *ThreadRipper, gk: *GateKeeper) void {
     tr.dispatchBatch(gk.action_list);
     gk.wait();
 }
 
-fn createNodeWithCtx(tr: *ThreadRipper, comptime func: anytype, args: anytype) !*Node {
-    if (builtin.single_threaded) {
-        try @call(.auto, func, args);
-        return;
-    }
-
-    const Args = @TypeOf(args);
-    const Closure = struct {
-        arguments: Args,
-        tr: *ThreadRipper,
-        run_node: Node = .{ .data = .{ .runFn = runFn } },
-
-        fn runFn(action: *Action, ctx: ?*Context) !void {
-            const run_node: *Node = @fieldParentPtr("data", action);
-            const closure: *@This() = @alignCast(@fieldParentPtr("run_node", run_node));
-            // print("{any}\n", .{ctx.?.id});
-            try @call(.auto, func, .{ closure.arguments[0], closure.arguments[1], ctx.? });
-
-            // In a lock-free context, we need to ensure memory ordering
-            // Use atomic fence before destruction to ensure all writes are visible
-            // @fence(.acquire);
-
-            closure.tr.arena.destroy(closure);
-            // @fence(.release);
-        }
-    };
-
-    const closure = try tr.arena.create(Closure);
-    closure.* = .{
-        .arguments = args,
-        .tr = tr,
-    };
-    // @fence(.release);
-    return &closure.run_node;
-}
+// fn createNodeWithCtx(tr: *ThreadRipper, comptime func: anytype, args: anytype) !*Node {
+//     if (builtin.single_threaded) {
+//         try @call(.auto, func, args);
+//         return;
+//     }
+//
+//     const Args = @TypeOf(args);
+//     const Closure = struct {
+//         arguments: Args,
+//         tr: *ThreadRipper,
+//         run_node: Node = .{ .data = .{ .runFn = runFn } },
+//
+//         fn runFn(action: *Action, ctx: ?*Context) !void {
+//             const run_node: *Node = @fieldParentPtr("data", action);
+//             const closure: *@This() = @alignCast(@fieldParentPtr("run_node", run_node));
+//             // print("{any}\n", .{ctx.?.id});
+//             try @call(.auto, func, .{ closure.arguments[0], closure.arguments[1], ctx.? });
+//
+//             // In a lock-free context, we need to ensure memory ordering
+//             // Use atomic fence before destruction to ensure all writes are visible
+//             // @fence(.acquire);
+//
+//             closure.tr.arena.destroy(closure);
+//             // @fence(.release);
+//         }
+//     };
+//
+//     const closure = try tr.arena.create(Closure);
+//     closure.* = .{
+//         .arguments = args,
+//         .tr = tr,
+//     };
+//     // @fence(.release);
+//     return &closure.run_node;
+// }
 
 fn createNode(tr: *ThreadRipper, comptime func: anytype, args: anytype) !*Node {
     if (builtin.single_threaded) {
@@ -407,7 +407,7 @@ fn createNode(tr: *ThreadRipper, comptime func: anytype, args: anytype) !*Node {
         tr: *ThreadRipper,
         run_node: Node = .{ .data = .{ .runFn = runFn } },
 
-        fn runFn(action: *Action, _: ?*Context) !void {
+        fn runFn(action: *Action) !void {
             const run_node: *Node = @fieldParentPtr("data", action);
             const closure: *@This() = @alignCast(@fieldParentPtr("run_node", run_node));
             try @call(.auto, func, closure.arguments);

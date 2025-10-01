@@ -34,7 +34,7 @@ pub fn status(self: *Fiber) Status {
 }
 
 // Here we take the Frame and grab the parentPtr of the Frame which is theFiber
-pub fn run(current: *Frame, target: *Frame) callconv(.C) noreturn {
+pub fn run(current: *Frame, target: *Frame) callconv(.c) noreturn {
     const current_coro: *Fiber = @fieldParentPtr("f_frame", current);
     const target_coro: *Fiber = @fieldParentPtr("f_frame", target);
 
