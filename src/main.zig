@@ -27,10 +27,10 @@ pub fn main() !void {
         .server_port = 8080,
         .sticky_server = false,
         .max = 256,
-        .max_body_size = 4 * 1024 * 1024,
+        .max_body_size = 4 * 1024,
         .callback = handle,
     };
     var loom: loompkg.Loom = undefined;
-    try loom.new(config, &allocator, 0);
+    try loom.new(config, &allocator);
     try loom.listen();
 }

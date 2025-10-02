@@ -57,6 +57,7 @@ pub fn ArgsTuple(comptime Fn: type) type {
 }
 // Step 3
 // From func calls init first
+/// fromSig generates a comptime type signature from a function, this is used to inject arguments
 pub fn fromFunc(comptime Func: anytype, comptime options: Options) type {
     return fromSig(Signature.init(Func, options));
 }
@@ -73,8 +74,6 @@ pub fn fromSig(comptime Sig: Signature) type {
     // the inner storage holds this data
     // retval is the ReturnT of Signature
     // retvale is the ReturnType of our Function
-    // pub fn incr() void {}
-    // void in this case
     const InnerStorage = struct {
         args: Sig.ArgsT,
         /// Values that are produced during coroutine execution
@@ -116,7 +115,7 @@ pub fn fromSig(comptime Sig: Signature) type {
         }
 
         pub fn status(self: @This()) Fiber.Fiber.Status {
-            return self._fiber.status;
+            return self._fiber.f_status;
         }
 
         fn wrapfn() !void {

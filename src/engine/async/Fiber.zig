@@ -13,6 +13,7 @@ pub const Status = enum {
     Active,
     Done,
     Error,
+    Rerun,
 };
 
 pub const Fiber = @This();
@@ -23,14 +24,14 @@ storage: ?*anyopaque = null,
 err: ?anyerror = null,
 id: usize,
 /// The coroutine that will be yielded to upon suspend
-caller: *Fiber = undefined,
+caller: ?*Fiber = null,
 
 pub fn frame(self: *Fiber) *Fiber {
     return self;
 }
 
 pub fn status(self: *Fiber) Status {
-    return self.status;
+    return self.f_status;
 }
 
 // Here we take the Frame and grab the parentPtr of the Frame which is theFiber
@@ -44,6 +45,7 @@ pub fn run(current: *Frame, target: *Frame) callconv(.c) noreturn {
         Scheduler.maker_state.switchOut(current_coro);
     };
     target_coro.f_status = Status.Done;
+    // Scheduler.xsuspend();
     _ = Scheduler.maker_state.fiber_count.fetchSub(1, .seq_cst);
     // Here we take the target and switch back to the root when finished
     Scheduler.maker_state.switchOut(current_coro);

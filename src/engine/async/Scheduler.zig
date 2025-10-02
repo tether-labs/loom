@@ -254,10 +254,11 @@ pub fn activate(fiber: *Fiber) void {
 /// For more info see [the docs](url)
 pub fn xsuspend() void {
     const callee = maker_state.callee orelse return;
+    const caller = callee.caller orelse return;
     // when calling suspend we want to return to the parent
     // right now caller is the parent
     // so we pass the parent but since maker.callee is active the current_fiber will now be the switch
-    maker_state.switchOut(callee.caller);
+    maker_state.switchOut(caller);
 }
 
 /// cancel the current running fiber
@@ -271,10 +272,10 @@ pub fn xcancel(target: *Fiber) void {
     maker_state.switchOut(target.caller);
 }
 // ========================================================================================
-// Maker the maker is the local thread
-// We set the threadlocal to themaker
-// we first call our coroutine with resume
-// we then set target fiber caller to thecurrent_fiber
+// Maker is the local thread
+// We set the threadlocal to the maker
+// we first call our coroutine with resume, this takes the fiber we want to run as argument
+// we then set target fiber caller to the current_fiber
 // we do this so that when we switch back and we have a callee stored we can the parent again
 // cc = childCoro
 // rc = rootCoro
@@ -296,10 +297,11 @@ pub const Maker = struct {
         .f_status = .Start,
         .func = undefined,
         .f_frame = undefined,
-        .id = undefined,
+        .id = 0,
     },
+    /// The callee is the fiber that is currently running
     callee: ?*Fiber = null,
-    fiber_count: Atomic(usize) = Atomic(usize).init(0),
+    fiber_count: Atomic(usize) = Atomic(usize).init(1),
 
     pub fn status(maker: *@This()) SchedulerStatus {
         if (maker.fiber_count.load(.seq_cst) == 0) {
@@ -340,7 +342,11 @@ pub const Maker = struct {
     fn switchTo(maker: *@This(), target: *Fiber, set_caller: bool) void {
         // Here we grab the current running coroutine
         const current_fiber = maker.current();
-        if (current_fiber == target) return;
+        // std.debug.print("Current Fiber {any}, Target fiber {any}\n", .{ current_fiber.id, target.id });
+        if (current_fiber == target) {
+            std.debug.print("Cannot switch to same fiber\n", .{});
+            return;
+        }
         if (current_fiber.f_status != .Done) current_fiber.f_status = .Suspended;
         // we set the target.caller to the current runningfiber
         if (set_caller) target.caller = current_fiber;
@@ -348,11 +354,18 @@ pub const Maker = struct {
         // then we set the callee to the target
         maker.callee = target;
         // then we call the current_fiber to switch to the target
+        // std.debug.print("Calling switchTo {any}\n", .{target.id});
         current_fiber.f_frame.switchTo(&target.f_frame);
     }
 
     fn current(maker: *@This()) *Fiber {
-        return maker.callee orelse &maker.fiber;
+        if (maker.callee) |callee| {
+            // std.debug.print("Returning maker callee {any}\n", .{callee.id});
+            return callee;
+        } else {
+            // std.debug.print("Returning callee {any}\n", .{maker.fiber.id});
+            return &maker.fiber;
+        }
     }
 
     /// Returns the storage of the currently running coroutine
@@ -361,45 +374,49 @@ pub const Maker = struct {
     }
 };
 
-// fn counterFunc(x: *usize) !void {
-//     x.* += 1;
-//     xsuspend();
-//     x.* += 3;
-//     xsuspend();
-//     x.* += 5;
-// }
+fn counterFunc() !void {
+    while (true) {
+        std.debug.print("Counter Func {any}\n", .{counter});
+        counter += 1;
+        xsuspend();
+    }
+    // x.* += 3;
+    // xsuspend();
+    // x.* += 5;
+}
+
+var counter: usize = 0;
+test "simple" {
+    const allocator = std.testing.allocator;
+    var scheduler: Scheduler = undefined;
+    try scheduler.init(allocator);
+    const stack = try scheduler.stackAlloc(null);
+    defer allocator.free(stack);
+    var current_fiber: *Fiber = undefined;
+    current_fiber = try createFiber(counterFunc, .{}, stack);
+    // Start the callee coroutine
+
+    while (counter < 10) {
+        xresume(current_fiber);
+    }
+
+    // try std.testing.expectEqual(counter, 1);
+    // // Child yields back here
+    // xresume(&current_fiber);
+    // try std.testing.expectEqual(counter, 4);
+    // xresume(&current_fiber);
+    // try std.testing.expectEqual(counter, 9);
+    //
+    // try std.testing.expectEqual(current_fiber.status(), .Done);
+}
 //
-// test "simple" {
-//     const allocator = std.testing.allocator;
-//     var scheduler: Scheduler = undefined;
-//     try scheduler.init(allocator);
-//     const stack = try scheduler.stackAlloc(null);
-//     defer allocator.free(stack);
-//     _ = Signature.init(counterFunc, .{});
-//     var counter: usize = 0;
-//     var current_fiber: *Fiber = undefined;
-//     current_fiber = try createFiber(counterFunc, .{&counter}, stack);
-//     // Start the callee coroutine
-//     xresume(current_fiber);
-//     try std.testing.expectEqual(counter, 1);
-//     // Child yields back here
-//     xresume(current_fiber);
-//     try std.testing.expectEqual(counter, 4);
-//     xresume(current_fiber);
-//     try std.testing.expectEqual(counter, 9);
-//
-//     try std.testing.expectEqual(current_fiber.status, .Done);
-// }
-//
-// fn iterFn(start: usize) bool {
-//     var val = start;
-//     var incr: usize = 0;
-//     while (val < 10) : (val += incr) {
-//         incr = Iter.xyield(val);
+// fn iterFn(counter: *usize) void {
+//     while (true) {
+//         counter.* += 1;
+//         _ = Iter.xyield(counter);
 //     }
-//     return val == 28;
 // }
-// const Iter = Signature.fromFunc(iterFn, .{ .YieldT = usize, .InjectT = usize });
+// const Iter = Signature.fromFunc(iterFn, .{ .YieldT = *usize, .InjectT = *usize });
 //
 // test "iterator" {
 //     const allocator = std.testing.allocator;
@@ -408,17 +425,16 @@ pub const Maker = struct {
 //     const stack = try scheduler.stackAlloc(null);
 //     defer allocator.free(stack);
 //
-//     const x: usize = 1;
-//     var fiber = try Iter.init(.{x}, stack);
-//     var yielded: usize = undefined;
-//     yielded = Iter.xnext(fiber, 0);
-//     try std.testing.expectEqual(yielded, 1);
-//     yielded = Iter.xnext(fiber, 3);
-//     try std.testing.expectEqual(yielded, 4);
-//     yielded = Iter.xnext(fiber, 2);
-//     try std.testing.expectEqual(yielded, 6);
-//     const retval = Iter.xnextEnd(fiber, 22);
-//     try std.testing.expect(retval);
+//     var counter: usize = 0;
+//     var fiber = try Iter.init(.{&counter}, stack);
+//     var yielded: *usize = undefined;
+//     yielded = Iter.xnext(fiber, &counter);
+//     try std.testing.expectEqual(yielded.*, 1);
+//     yielded = Iter.xnext(fiber, &counter);
+//     try std.testing.expectEqual(yielded.*, 2);
+//     yielded = Iter.xnext(fiber, &counter);
+//     try std.testing.expectEqual(yielded.*, 3);
+//     _ = Iter.xnextEnd(fiber, &counter);
 //     try std.testing.expectEqual(fiber.status(), .Done);
 // }
 //
@@ -508,4 +524,3 @@ pub const Maker = struct {
 //     std.debug.print("{d} Main Sending {d}\n", .{ std.time.milliTimestamp(), val });
 //     try chan.send(val);
 // }
-

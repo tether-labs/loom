@@ -109,7 +109,6 @@ const ClientNode = Client.ClientNode;
 pub var logger: Logger = undefined;
 
 pub const Loom = @This();
-id: usize = 0,
 arena: *Allocator = undefined,
 config: Config = undefined,
 // Max connections
@@ -122,6 +121,7 @@ kqueue: KQueue = undefined,
 io: Io = undefined,
 stacks: []Stack = undefined,
 current_fiber: *Fiber = undefined,
+fibers: []*Fiber = undefined,
 
 // The number of clients we currently have connected
 connected: u32 = undefined,
@@ -147,14 +147,29 @@ pub const Config = struct {
 };
 
 const resp = "HTTP/1.1 200 OK\r\nDate: Tue, 19 Aug 2025 18:37:36 GMT\r\nContent-Length: 7\r\nContent-Type: text/plain charset=utf-8\r\n\r\nSUCCESS";
-fn handle(client: *Client, data: []const u8) !void {
-    try callback(client, data);
+// _ = try posix.write(client.socket, resp);
+fn handle(client: *Client, _: []const u8) !void {
+    // try callback(client, data);
+    _ = try posix.write(client.socket, resp);
     xsuspend();
+}
+
+fn handleCTX() !void {
+    while (true) {
+        try callback(handler_context.client, handler_context.msg);
+        xsuspend();
+    }
 }
 
 /// This is the Cors struct default set to null
 var callback: *const fn (*Client, []const u8) anyerror!void = undefined;
-pub fn new(target: *Loom, config: Config, arena: *Allocator, id: usize) !void {
+const HandlerContext = struct {
+    msg: []const u8 = "",
+    client: *Client = undefined,
+};
+var handler_context: HandlerContext = .{};
+
+pub fn new(target: *Loom, config: Config, arena: *Allocator) !void {
     var scheduler: Scheduler = undefined;
     try scheduler.init(arena.*);
 
@@ -165,13 +180,16 @@ pub fn new(target: *Loom, config: Config, arena: *Allocator, id: usize) !void {
     io.init(arena, &kqueue);
 
     const stacks = try arena.alloc(Stack, config.max);
+    const fibers = try arena.alloc(*Fiber, config.max);
     for (0..config.max) |i| {
         stacks[i] = try scheduler.stackAlloc(1024 * 1024 * 2);
+        fibers[i] = try createFiber(handleCTX, .{}, stacks[i]);
     }
 
+    // const stack = try scheduler.stackAlloc(1024 * 1024 * 2);
+    // const fiber = try createFiber(handleCTX, .{}, stack);
     logger.init();
     target.* = Loom{
-        .id = id,
         .config = config,
         .arena = arena,
         .max = config.max,
@@ -184,6 +202,8 @@ pub fn new(target: *Loom, config: Config, arena: *Allocator, id: usize) !void {
         .stacks = stacks,
         .io = io,
         .max_body_size = config.max_body_size,
+        .fibers = fibers,
+        // .current_fiber = fiber,
     };
 
     Client.writer_buf = try arena.alloc(u8, config.max_body_size);
@@ -277,17 +297,17 @@ fn run(
                             };
 
                             // client.read_timeout = std.time.milliTimestamp() + READ_TIMEOUT_MS;
-                            // read_timeout_list.remove(client.read_timeout_node);
-                            // read_timeout_list.append(client.read_timeout_node);
-                            client.fiber = try createFiber(handle, .{ client, msg }, loom.stacks[loom.connected - 1]);
+                            client.fiber = loom.fibers[loom.connected - 1];
+                            handler_context.client = client;
+                            handler_context.msg = msg;
                             xresume(client.fiber.?);
                         }
                     } else if (filter == system.EVFILT.WRITE) {
                         // If we couldn't write for some reason initially then
                         // when we receive a write event we write to the client
-                        _ = client.writeMessage() catch {
-                            loom.closeClient(client);
-                        };
+                        // _ = client.writeMessage() catch {
+                        loom.closeClient(client);
+                        // };
                     }
                 },
             }
