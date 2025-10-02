@@ -50,7 +50,6 @@ pub fn wait(self: *KQueue, timeout_ms: i32) ![]system.Kevent {
 }
 
 pub fn addListener(self: *KQueue, listener: posix.socket_t) !void {
-    std.debug.print("Registering listener fd={d} to kqueue={d}\n", .{ listener, self.kfd });
     // ok to use EV.ADD to renable the listener if it was previous
     // disabled via removeListener
     try self.queueChange(.{

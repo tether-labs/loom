@@ -217,7 +217,6 @@ const Reader = struct {
     }
 };
 
-// var writer_buf: [4096*50]u8 = [_]u8{0} ** (4096 * 50);
 pub var writer_buf: []u8 = undefined;
 const Writer = struct {
     buf: []u8,
@@ -226,7 +225,6 @@ const Writer = struct {
     offset: usize = 0,
 
     pub fn init(_: Allocator, _: usize) !Writer {
-        // const buf = try arena.alloc(u8, size);
         return .{
             .buf = writer_buf,
             .pos = 0,
@@ -241,13 +239,11 @@ const Writer = struct {
 
     pub fn fillWriteBuffer(self: *Writer, msg: []const u8) !void {
         self.pos += msg.len;
-        // self.pos = msg.len;
         @memcpy(self.buf[self.start..self.pos], msg);
         self.start += msg.len;
     }
 
     pub fn writeMessage(self: *Writer, socket: posix.socket_t) !void {
-        std.log.debug("Writing\n", .{  });
         var buf = self.buf;
         const end = self.pos;
         const start = self.start;
@@ -262,22 +258,14 @@ const Writer = struct {
             return error.Closed;
         }
 
-        std.log.debug("Amount written: {}\n", .{wv});
         // This means we havent written all the data yet
         self.offset += wv;
         if (end > self.offset) {
-            std.log.debug("Offset {any} End: {any}\n", .{ self.offset, end });
             return error.WouldBlock;
         } else {
-            std.log.debug("Closed \n", .{});
             self.offset = 0;
             self.pos = 0;
             self.start = 0;
         }
-
-        // self.pos = pos + wv;
-        // self.start = 0;
-        // self.pos = 0;
-        // self.buf = undefined;
     }
 };

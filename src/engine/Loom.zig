@@ -9,8 +9,8 @@ const Parsed = std.json.Parsed;
 const net = std.net;
 const Signature = @import("async/Signature.zig");
 const Scheduler = @import("async/Scheduler.zig");
-const xresume = Scheduler.xresume;
-const xsuspend = Scheduler.xsuspend;
+pub const xresume = Scheduler.xresume;
+pub const xsuspend = Scheduler.xsuspend;
 const ThreadRipper = @import("async/pool/ThreadRipper.zig");
 const Client = @import("Client.zig");
 const KQueue = @import("KQueue.zig");
@@ -107,7 +107,6 @@ const READ_TIMEOUT_MS = 60_000;
 const ClientList = Client.ClientList;
 const ClientNode = Client.ClientNode;
 pub var logger: Logger = undefined;
-pub var loom_engine: Scheduler = undefined;
 
 pub const Loom = @This();
 id: usize = 0,
@@ -133,7 +132,6 @@ read_timeout_list: ClientList = undefined,
 client_pool: std.heap.MemoryPool(Client) = undefined,
 // for creating nodes for our read_timeout list
 client_node_pool: std.heap.MemoryPool(ClientNode) = undefined,
-fiber: FiberGen = undefined,
 scheduler: Scheduler = undefined,
 stack: Stack = undefined,
 max_body_size: usize,
@@ -148,31 +146,17 @@ pub const Config = struct {
     callback: *const fn (*Client, []const u8) anyerror!void,
 };
 
-const resp = "HTTP/1.1 200 OK\r\nDate: Tue, 19 Aug 2025 18:37:36 GMT\r\nContent-Length: 1000000\r\nContent-Type: text/plain charset=utf-8\r\n\r\n";
-var payload: []u8 = undefined;
-var allocator = std.heap.page_allocator;
-fn handle(client: *Client, _: []const u8) !void {
-    try client.fillWriteBuffer(payload);
-    _ = try client.writeMessage();
+const resp = "HTTP/1.1 200 OK\r\nDate: Tue, 19 Aug 2025 18:37:36 GMT\r\nContent-Length: 7\r\nContent-Type: text/plain charset=utf-8\r\n\r\nSUCCESS";
+fn handle(client: *Client, data: []const u8) !void {
+    try callback(client, data);
     xsuspend();
 }
 
-pub fn makePayload(size: usize) ![]u8 {
-    const buf = try allocator.alloc(u8, size);
-    @memset(buf, 'x');
-    return buf;
-}
-
 /// This is the Cors struct default set to null
-const FiberGen = Signature.fromFunc(listen, .{ .YieldT = *Conn, .InjectT = *Conn });
+var callback: *const fn (*Client, []const u8) anyerror!void = undefined;
 pub fn new(target: *Loom, config: Config, arena: *Allocator, id: usize) !void {
-    payload = try arena.alloc(u8, (resp.len + 1000000));
-    @memcpy(payload[0..resp.len], resp);
-    @memcpy(payload[resp.len..(resp.len + 1000000)], try makePayload(1000000));
-    // payload = try makePayload(800000);
     var scheduler: Scheduler = undefined;
     try scheduler.init(arena.*);
-    loom_engine = scheduler;
 
     var kqueue = try KQueue.init();
     errdefer kqueue.deinit();
@@ -202,11 +186,10 @@ pub fn new(target: *Loom, config: Config, arena: *Allocator, id: usize) !void {
         .max_body_size = config.max_body_size,
     };
 
-    Client.writer_buf = try allocator.alloc(u8, config.max_body_size);
-    Client.reader_buf = try allocator.alloc(u8, config.max_read_size);
-    print("Max body size: {}\n", .{config.max_body_size});
-    print("Max read size: {}\n", .{config.max_read_size});
-    errdefer allocator.free(Client.writer_buf);
+    Client.writer_buf = try arena.alloc(u8, config.max_body_size);
+    Client.reader_buf = try arena.alloc(u8, config.max_read_size);
+    callback = config.callback;
+    errdefer arena.free(Client.writer_buf);
 }
 
 pub fn deinit(self: *Loom) void {
@@ -243,19 +226,6 @@ pub fn createListener(loom: *Loom) !c_int {
     return listener;
 }
 
-const Conn = struct {
-    client: *Client = undefined,
-    msg: []const u8 = "",
-    received: bool = false,
-};
-
-pub fn accept(self: *Loom) ?*Conn {
-    const value = self.fiber.xnextNoop();
-    if (value.received) {
-        return value;
-    }
-    return null;
-}
 /// This function calls listen on the Loom instance.
 ///
 /// # Returns:
@@ -316,7 +286,6 @@ fn run(
                         // If we couldn't write for some reason initially then
                         // when we receive a write event we write to the client
                         _ = client.writeMessage() catch {
-                            // std.debug.print("Write error: {}\n", .{err});
                             loom.closeClient(client);
                         };
                     }
