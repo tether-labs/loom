@@ -22,14 +22,12 @@ address: std.net.Address,
 fiber: ?*Fiber = null,
 fiber_index: usize = 0,
 stack: ?Stack = undefined,
-closed: bool = false,
 
 // Used to read length-prefixed messages
 msg: []const u8,
 
 // Used to write messages
 writer: Writer,
-reader: Reader,
 response: []const u8,
 
 // absolute time, in millisecond, when this client should timeout if
@@ -40,8 +38,8 @@ read_timeout: i64,
 read_timeout_node: *ClientNode,
 
 pub fn init(arena: Allocator, socket: posix.socket_t, address: std.net.Address, kqueue: *KQueue) !Client {
-    const reader = try Reader.init(arena, 4096);
-    errdefer reader.deinit(arena);
+    // const reader = try Reader.init(arena, 4096);
+    // errdefer reader.deinit(arena);
 
     const writer = try Writer.init(arena, 4096);
     errdefer writer.deinit(arena);
@@ -55,7 +53,6 @@ pub fn init(arena: Allocator, socket: posix.socket_t, address: std.net.Address, 
         .address = address,
         .msg = "",
         .writer = writer,
-        .reader = reader,
         .response = "",
         .read_timeout = 0, // let the server set this
         .read_timeout_node = undefined, // hack/ugly, let the server set this when init returns
@@ -143,26 +140,30 @@ pub fn findCRLFCRLF(payload: []const u8) ?usize {
 }
 
 // pub var reader_buf: [2097152]u8 = [_]u8{0} ** 2097152;
-// pub var reader_buf: []u8 = undefined;
-// pub fn readMessage(self: *Client) ![]const u8 {
-//     const rv = try posix.read(self.socket, reader_buf);
-//     if (rv == 0) {
-//         return error.Closed;
-//     }
-//     return reader_buf[0..rv];
-// }
+pub var reader_buf: []u8 = undefined;
 pub fn readMessage(self: *Client) ![]const u8 {
-    return self.reader.readMessage(self.socket) catch |err| {
-        switch (err) {
-            error.WouldBlock => {
-                return error.WouldBlock;
-            },
-            error.BrokenPipe, error.ConnectionResetByPeer => {
-                return err;
-            },
-            else => return err,
-        }
-    };
+    // return self.reader.readMessage(self.socket) catch |err| {
+    //     // try Loom.logger.err("Read msg {any}", .{err}, @src());
+    //     switch (err) {
+    //         error.WouldBlock => return null,
+    //         else => return err,
+    //     }
+    // };
+
+    const rv = try posix.read(self.socket, reader_buf);
+    if (rv == 0) {
+        return error.Closed;
+    }
+
+    // var end = buf[0..rv].len;
+    // std.debug.print("{s}\n", .{buf[0..rv]});
+    // if (buf[end - 1] != 10) {
+    //     // std.debug.print("H\n", .{});
+    //     end = findCRLFCRLF(buf[0..rv]).?;
+    //     // std.debug.print("{any}\n", .{end});
+    // }
+
+    return reader_buf[0..rv];
 }
 
 pub fn writeMessage(self: *Client) !void {
@@ -170,11 +171,12 @@ pub fn writeMessage(self: *Client) !void {
         switch (err) {
             error.WouldBlock => {
                 // Arm for WRITE notifications
-                try self.kqueue.writeMode(self);
-                xsuspend();
-                return;
+                return err;
             },
             error.BrokenPipe, error.ConnectionResetByPeer => {
+                // std.debug.print("client disconnected\n", .{});
+                // Client disconnected - DON'T try to resume
+                // Just return the error and let the event loop clean up
                 return err;
             },
             else => return err,
@@ -185,7 +187,7 @@ pub fn writeMessage(self: *Client) !void {
 
 pub fn chunked(self: *Client, payload: []const u8) !void {
     var pos: usize = 0;
-    while (pos < payload.len) {
+    outer: while (pos < payload.len) {
         // Calculate how much we can fit in the buffer
         const remaining = payload.len - pos;
         const buffer_capacity = self.writer.buf.len;
@@ -199,7 +201,14 @@ pub fn chunked(self: *Client, payload: []const u8) !void {
         // Keep trying to write this chunk until complete
         while (true) {
             self.writeMessage() catch |err| {
-                return err;
+                switch (err) {
+                    error.WouldBlock => {
+                        continue :outer;
+                    },
+                    else => {
+                        return err;
+                    },
+                }
             };
             // Write completed, move to next chunk
             break;
@@ -215,73 +224,17 @@ pub fn fillWriteBuffer(self: *Client, msg: []const u8) !void {
     };
 }
 
-// pub fn writeMessage(self: *Client) !void {
-//     self.writer.writeMessage(self.socket) catch |err| {
-//         switch (err) {
-//             error.WouldBlock => {
-//                 // Arm for WRITE notifications
-//                 return err;
-//             },
-//             error.BrokenPipe, error.ConnectionResetByPeer => {
-//                 // std.debug.print("client disconnected\n", .{});
-//                 // Client disconnected - DON'T try to resume
-//                 // Just return the error and let the event loop clean up
-//                 return err;
-//             },
-//             else => return err,
-//         }
-//     };
-//     return; // This is the success (void) case
-// }
-//
-// pub fn chunked(self: *Client, payload: []const u8) !void {
-//     var pos: usize = 0;
-//     outer: while (pos < payload.len) {
-//         // Calculate how much we can fit in the buffer
-//         const remaining = payload.len - pos;
-//         const buffer_capacity = self.writer.buf.len;
-//         const chunk_size = @min(remaining, buffer_capacity);
-//
-//         // Fill the write buffer with the chunk
-//         self.fillWriteBuffer(payload[pos .. pos + chunk_size]) catch {
-//             // std.debug.print("Fill write buffer error: {any}\n", .{err});
-//         };
-//
-//         // Keep trying to write this chunk until complete
-//         while (true) {
-//             self.writeMessage() catch |err| {
-//                 switch (err) {
-//                     error.WouldBlock => {
-//                         continue :outer;
-//                     },
-//                     else => {
-//                         return err;
-//                     },
-//                 }
-//             };
-//             // Write completed, move to next chunk
-//             break;
-//         }
-//         pos += chunk_size;
-//     }
-// }
-//
-// pub fn fillWriteBuffer(self: *Client, msg: []const u8) !void {
-//     self.writer.fillWriteBuffer(msg) catch |err| {
-//         try Loom.logger.err("Fill write buffer {any}", .{err}, @src());
-//         return err;
-//     };
-// }
-
 const Reader = struct {
-    buf: [8192]u8 = undefined,
+    buf: [4096]u8 = [_]u8{0} ** 4096,
     pos: usize = 0,
-    offset: usize = 0, // How much we've sent from the buffer
+    start: usize = 0,
 
     pub fn init(_: Allocator, _: usize) !Reader {
+        // const buf = try arena.alloc(u8, size);
         return .{
             .pos = 0,
-            .offset = 0,
+            .start = 0,
+            // .buf = buf,
         };
     }
 
@@ -289,23 +242,27 @@ const Reader = struct {
         // arena.free(self.buf);
     }
 
+    // !!!!!!!!!!!!!!!This process of adding is extremely heavy
+    // self.pos += rv;
     pub fn readMessage(self: *Reader, socket: posix.socket_t) ![]u8 {
-        // Try to write remaining data
-        const rv = posix.read(socket, self.buf[0..]) catch |err| {
-            switch (err) {
-                error.WouldBlock => return error.WouldBlock,
-                else => return err,
-            }
-        };
-        self.pos = rv;
+        var buf = self.buf;
+        const start = self.start;
 
+        const rv = try posix.read(socket, buf[start..]);
         if (rv == 0) {
             return error.Closed;
         }
 
-        return self.buf[0..self.pos];
+        self.pos = rv;
+        std.debug.assert(self.pos >= start);
+        const msg = buf[start..self.pos];
+        self.start += msg.len;
+        return msg;
     }
 };
+
+pub var writer_buf: []u8 = undefined;
+
 const Writer = struct {
     buf: [8192]u8 = undefined,
     pos: usize = 0, // Current write position in buffer
@@ -374,3 +331,54 @@ const Writer = struct {
         self.offset = 0;
     }
 };
+// const Writer = struct {
+//     buf: [8192]u8 = undefined, // Buffer to write to
+//     pos: usize = 0,
+//     start: usize = 0,
+//     offset: usize = 0,
+//
+//     pub fn init(_: Allocator, _: usize) !Writer {
+//         return .{
+//             // .buf = writer_buf,
+//             .pos = 0,
+//             .start = 0,
+//             .offset = 0,
+//         };
+//     }
+//
+//     pub fn deinit(_: *const Writer, _: Allocator) void {
+//         // arena.free(self.buf);
+//     }
+//
+//     pub fn fillWriteBuffer(self: *Writer, msg: []const u8) !void {
+//         self.pos += msg.len;
+//         @memcpy(self.buf[self.start..self.pos], msg);
+//         self.start += msg.len;
+//     }
+//
+//     pub fn writeMessage(self: *Writer, socket: posix.socket_t) !void {
+//         var buf = self.buf;
+//         const end = self.pos;
+//         const start = self.start;
+//         std.debug.assert(end >= start);
+//         const wv = posix.write(socket, buf[self.offset..end]) catch |err| {
+//             switch (err) {
+//                 error.WouldBlock => return error.WouldBlock,
+//                 else => return err,
+//             }
+//         };
+//         if (wv == 0) {
+//             return error.Closed;
+//         }
+//
+//         // This means we havent written all the data yet
+//         self.offset += wv;
+//         if (end > self.offset) {
+//             return error.WouldBlock;
+//         } else {
+//             self.offset = 0;
+//             self.pos = 0;
+//             self.start = 0;
+//         }
+//     }
+// };

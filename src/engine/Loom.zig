@@ -150,9 +150,9 @@ pub const Config = struct {
 const resp = "HTTP/1.1 200 OK\r\nDate: Tue, 19 Aug 2025 18:37:36 GMT\r\nContent-Length: 7\r\nContent-Type: text/plain charset=utf-8\r\n\r\nSUCCESS";
 
 fn handleCTX() !void {
-    const client = handler_context.client;
-    try callback(client, client.msg);
+    try callback(handler_context.client, handler_context.msg);
 }
+
 /// This is the Cors struct default set to null
 var callback: *const fn (*Client, []const u8) anyerror!void = undefined;
 const HandlerContext = struct {
@@ -174,7 +174,7 @@ pub fn new(target: *Loom, config: Config, arena: *Allocator) !void {
     const stacks = try arena.alloc(Stack, config.max);
     const fibers = try arena.alloc(Fiber, config.max);
     for (0..config.max) |i| {
-        stacks[i] = try scheduler.stackAlloc(65536);
+        stacks[i] = try scheduler.stackAlloc(1024);
         const fiber = try createFiber(handleCTX, .{}, stacks[i]);
         fibers[i] = fiber.*;
     }
@@ -211,8 +211,10 @@ pub fn new(target: *Loom, config: Config, arena: *Allocator) !void {
         // .current_fiber = fiber,
     };
 
-    // Client.writer_buf = try arena.alloc(u8, config.max_body_size);
+    Client.writer_buf = try arena.alloc(u8, config.max_body_size);
+    Client.reader_buf = try arena.alloc(u8, config.max_read_size);
     callback = config.callback;
+    errdefer arena.free(Client.writer_buf);
 }
 
 pub fn deinit(self: *Loom) void {
@@ -281,8 +283,6 @@ fn run(
                 },
                 else => |n| {
                     const client: *Client = @ptrFromInt(n);
-
-                    // if (client.closed) continue;
                     const filter = ready.filter;
 
                     // Here we read in the client data
@@ -294,144 +294,34 @@ fn run(
                                     error.WouldBlock => {
                                         break;
                                     },
-                                    error.BrokenPipe, error.ConnectionResetByPeer, error.NotOpenForReading => {
-                                        // if (client.closed) break;
-                                        // client.closed = true;
-                                        // const stack = client.stack.?;
-                                        // loom.arena.free(stack);
-                                        var replaced_fiber = loom.arena.create(Fiber) catch |create_err| {
-                                            log.err("Failed to create new fiber: {any}", .{create_err});
-                                            break;
-                                        };
-                                        const new_stack = loom.scheduler.stackAlloc(65536) catch {
-                                            log.err("Failed to allocate new stack: {any}", .{err});
-                                            break;
-                                        };
-                                        replaced_fiber = createFiber(handleCTX, .{}, new_stack) catch |replace_err| {
-                                            log.err("Failed to reset fiber on close: {any}", .{replace_err});
-                                            break;
-                                        };
-
-                                        // std.debug.print("Closing client {d}\n", .{client.fiber_index});
-                                        loom.free_fiber_indices.append(client.fiber_index) catch |free_err| {
-                                            // This is bad. We can't return the fiber.
-                                            log.err("CRITICAL: Failed to return fiber index {d} to pool: {any}", .{ client.fiber_index, free_err });
-                                            break;
-                                        };
-                                        loom.fibers[client.fiber_index] = replaced_fiber.*;
-                                        loom.stacks[client.fiber_index] = new_stack;
-                                        if (loom.connected == 0) break;
-                                        loom.connected -= 1;
-                                        // posix.close(client.socket);
-                                        break;
-                                    },
                                     else => {
                                         loom.closeClient(client);
                                         break;
                                     },
                                 }
                             };
-                            const fiber = client.fiber.?;
-                            const stack = client.stack.?;
-
-                            if (fiber.status() == .Done) {
-                                Scheduler.resetFiber(fiber, stack, handleCTX) catch |e| {
-                                    log.err("Failed to reset fiber on close: {any}", .{e});
-                                    loom.closeClient(client);
-                                };
-                            }
-
-                            // std.debug.print("Resuming fiber {d}\n", .{client.fiber_index});
                             handler_context.client = client;
-                            client.msg = msg;
-                            xresume(fiber);
+                            handler_context.msg = msg;
+
+                            //////////////////////////////////////////////////////////////////////////////////
+                            handleCTX() catch |err| {
+                                std.debug.print("Handler error: {any}\n", .{err});
+                                loom.closeClient(client);
+                                break;
+                            };
                         }
                     } else if (filter == system.EVFILT.WRITE) {
-                        // client.writeMessage() catch |err| {
-                        //     std.debug.print("Write error: {any}\n", .{err});
-                        //     loom.closeClient(client);
-                        // };
-                        if (client.fiber) |fiber| {
-                            if (fiber.status() != .Done) {
-                                xresume(fiber);
-                            } else {
-                                Scheduler.resetFiber(fiber, client.stack.?, handleCTX) catch |e| {
-                                    log.err("Failed to reset fiber on close: {any}", .{e});
-                                    loom.closeClient(client);
-                                    // Don't return to pool if reset failed?
-                                };
-                            }
-                        } else {
-                            std.debug.print("No fiber\n", .{});
-                            // loom.closeClient(client);
-                        }
+                        //////////////////////////////////////////////////////////////////////////////////
+                        client.writeMessage() catch |err| {
+                            std.debug.print("Write error: {any}\n", .{err});
+                            loom.closeClient(client);
+                        };
                     }
                 },
             }
         }
     }
 }
-
-// fn run(
-//     loom: *Loom,
-//     listener: posix.socket_t,
-// ) !void {
-//     while (true) {
-//         // const next_timeout = loom.enforceTimeout();
-//         const ready_events = loom.readEvents(-1) catch return;
-//         for (ready_events) |ready| {
-//             const nptr = ready.udata;
-//
-//             switch (nptr) {
-//                 0 => {
-//                     while (true) {
-//                         loom.acceptConn(listener) catch |err| switch (err) {
-//                             error.WouldBlock => break, // No more connections waiting, break inner loop
-//                             else => |e| log.err("accept error: {}", .{e}),
-//                         };
-//                     }
-//                 },
-//                 else => |n| {
-//                     const client: *Client = @ptrFromInt(n);
-//                     const filter = ready.filter;
-//
-//                     // Here we read in the client data
-//                     // we check the filter state
-//                     if (filter == system.EVFILT.READ) {
-//                         while (true) {
-//                             const msg = client.readMessage() catch |err| {
-//                                 switch (err) {
-//                                     error.WouldBlock => {
-//                                         break;
-//                                     },
-//                                     else => {
-//                                         loom.closeClient(client);
-//                                         break;
-//                                     },
-//                                 }
-//                             };
-//                             handler_context.client = client;
-//                             handler_context.msg = msg;
-//
-//                             //////////////////////////////////////////////////////////////////////////////////
-//                             handleCTX() catch |err| {
-//                                 std.debug.print("Handler error: {any}\n", .{err});
-//                                 loom.closeClient(client);
-//                                 break;
-//                             };
-//                         }
-//                     } else if (filter == system.EVFILT.WRITE) {
-//                         //////////////////////////////////////////////////////////////////////////////////
-//                         client.writeMessage() catch |err| {
-//                             std.debug.print("Write error: {any}\n", .{err});
-//                             loom.closeClient(client);
-//                         };
-//                     }
-//                 },
-//             }
-//         }
-//     }
-// }
 
 pub fn enforceTimeout(self: *Loom) i32 {
     const now = std.time.milliTimestamp();
@@ -466,7 +356,7 @@ pub fn acceptConn(self: *Loom, listener: posix.socket_t) !void {
     var address_len: posix.socklen_t = @sizeOf(net.Address);
 
     if (self.free_fiber_indices.items.len == 0) {
-        // print("We Ran out of space (no free fibers)\n", .{});
+        print("We Ran out of space (no free fibers)\n", .{});
         try self.kqueue.removeListener(listener);
         return; // Don't accept, just return
     }
@@ -521,17 +411,44 @@ pub fn readEvents(loom: *Loom, next_timeout: i32) ![]system.Kevent {
 }
 
 pub fn closeClient(self: *Loom, client: *Client) void {
+    // --- NEW LOGIC: RETURN FIBER TO POOL ---
+    // We MUST reset the fiber before putting it back,
+    // in case it died with an error.
+    // if (client.fiber.?.f_status != .Start) {
+    //      Scheduler.resetFiber(
+    //         client.fiber.?,
+    //         client.stack.?,
+    //         handleCTX,
+    //     ) catch |e| {
+    //         log.err("Failed to reset fiber on close: {any}", .{e});
+    //         // Don't return to pool if reset failed?
+    //     };
+    // }
+
     // Add the index back to the free list
-    if (client.closed) return;
-    client.closed = true;
     self.free_fiber_indices.append(client.fiber_index) catch |err| {
         // This is bad. We can't return the fiber.
         log.err("CRITICAL: Failed to return fiber index {d} to pool: {any}", .{ client.fiber_index, err });
     };
-    // client.deinit(self.arena.*);
-    posix.close(client.socket);
-    // self.client_pool.destroy(client);
+    // --- END NEW LOGIC ---
 
-    if (self.connected == 0) return;
+    // self.read_timeout_list.remove(&client.read_timeout_node.node);
+    // self.client_node_pool.destroy(client.read_timeout_node);
+    client.deinit(self.arena.*);
+    posix.close(client.socket);
+    self.client_pool.destroy(client);
     self.connected -= 1;
+
+    // If we have space again, re-enable the listener
+    // // (This logic might need to be refined, but it's the right idea)
+    // if (self.free_fiber_indices.items.len > 0) {
+    //     try self.kqueue.addListener(listener); // 'listener' needs to be available here
+    // }
+
+    // self.read_timeout_list.remove(&client.read_timeout_node.node);
+    // self.client_node_pool.destroy(client.read_timeout_node);
+    // client.deinit(self.arena.*);
+    // posix.close(client.socket);
+    // self.client_pool.destroy(client);
+    // self.connected -= 1;
 }
