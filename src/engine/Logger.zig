@@ -37,7 +37,11 @@ fn log(
 ) !void {
     logger.mutex.lock();
     defer logger.mutex.unlock();
-    const stderr = std.io.getStdErr().writer();
+    var buf: [1024]u8 = undefined;
+    var errstream = std.Io.Writer.fixed(&buf);
+    const stderr = &errstream;
+
+ 
     nosuspend stderr.print("[{d}] ", .{std.time.timestamp()}) catch return;
     nosuspend stderr.print("[{s}{s}\x1b[0m] ", .{ log_level.color(), @tagName(log_level) }) catch return;
     if (opt_src) |src| {

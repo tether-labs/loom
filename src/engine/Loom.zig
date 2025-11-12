@@ -121,7 +121,7 @@ kqueue: KQueue = undefined,
 io: Io = undefined,
 stacks: []Stack = undefined,
 current_fiber: *Fiber = undefined,
-fibers: []*Fiber = undefined,
+fibers: []Fiber = undefined,
 
 // The number of clients we currently have connected
 connected: u32 = undefined,
@@ -135,6 +135,7 @@ client_node_pool: std.heap.MemoryPool(ClientNode) = undefined,
 scheduler: Scheduler = undefined,
 stack: Stack = undefined,
 max_body_size: usize,
+free_fiber_indices: std.array_list.Managed(usize) = undefined,
 
 pub const Config = struct {
     server_addr: []const u8 = "0.0.0.0",
@@ -147,18 +148,9 @@ pub const Config = struct {
 };
 
 const resp = "HTTP/1.1 200 OK\r\nDate: Tue, 19 Aug 2025 18:37:36 GMT\r\nContent-Length: 7\r\nContent-Type: text/plain charset=utf-8\r\n\r\nSUCCESS";
-// _ = try posix.write(client.socket, resp);
-fn handle(client: *Client, _: []const u8) !void {
-    // try callback(client, data);
-    _ = try posix.write(client.socket, resp);
-    xsuspend();
-}
 
 fn handleCTX() !void {
-    while (true) {
-        try callback(handler_context.client, handler_context.msg);
-        xsuspend();
-    }
+    try callback(handler_context.client, handler_context.msg);
 }
 
 /// This is the Cors struct default set to null
@@ -180,11 +172,23 @@ pub fn new(target: *Loom, config: Config, arena: *Allocator) !void {
     io.init(arena, &kqueue);
 
     const stacks = try arena.alloc(Stack, config.max);
-    const fibers = try arena.alloc(*Fiber, config.max);
+    const fibers = try arena.alloc(Fiber, config.max);
     for (0..config.max) |i| {
-        stacks[i] = try scheduler.stackAlloc(1024 * 1024 * 2);
-        fibers[i] = try createFiber(handleCTX, .{}, stacks[i]);
+        stacks[i] = try scheduler.stackAlloc(1024);
+        const fiber = try createFiber(handleCTX, .{}, stacks[i]);
+        fibers[i] = fiber.*;
     }
+
+    // --- ADD THIS ---
+    var free_list = std.array_list.Managed(usize).init(arena.*);
+    errdefer free_list.deinit(); // In case of error below
+    try free_list.ensureTotalCapacity(config.max);
+
+    // Add all indices, 0..max. We'll pop from the end.
+    for (0..config.max) |i| {
+        free_list.appendAssumeCapacity(i);
+    }
+    // --- END ADD ---
 
     // const stack = try scheduler.stackAlloc(1024 * 1024 * 2);
     // const fiber = try createFiber(handleCTX, .{}, stack);
@@ -203,6 +207,7 @@ pub fn new(target: *Loom, config: Config, arena: *Allocator) !void {
         .io = io,
         .max_body_size = config.max_body_size,
         .fibers = fibers,
+        .free_fiber_indices = free_list,
         // .current_fiber = fiber,
     };
 
@@ -265,9 +270,9 @@ fn run(
         // const next_timeout = loom.enforceTimeout();
         const ready_events = loom.readEvents(-1) catch return;
         for (ready_events) |ready| {
-            // ready is type kevent
-            // udata is the client conn value
-            switch (ready.udata) {
+            const nptr = ready.udata;
+
+            switch (nptr) {
                 0 => {
                     while (true) {
                         loom.acceptConn(listener) catch |err| switch (err) {
@@ -276,8 +281,8 @@ fn run(
                         };
                     }
                 },
-                else => |nptr| {
-                    const client: *Client = @ptrFromInt(nptr);
+                else => |n| {
+                    const client: *Client = @ptrFromInt(n);
                     const filter = ready.filter;
 
                     // Here we read in the client data
@@ -295,19 +300,22 @@ fn run(
                                     },
                                 }
                             };
-
-                            // client.read_timeout = std.time.milliTimestamp() + READ_TIMEOUT_MS;
-                            client.fiber = loom.fibers[loom.connected - 1];
                             handler_context.client = client;
                             handler_context.msg = msg;
-                            xresume(client.fiber.?);
+
+                            //////////////////////////////////////////////////////////////////////////////////
+                            handleCTX() catch |err| {
+                                std.debug.print("Handler error: {any}\n", .{err});
+                                loom.closeClient(client);
+                                break;
+                            };
                         }
                     } else if (filter == system.EVFILT.WRITE) {
-                        // If we couldn't write for some reason initially then
-                        // when we receive a write event we write to the client
-                        // _ = client.writeMessage() catch {
-                        loom.closeClient(client);
-                        // };
+                        //////////////////////////////////////////////////////////////////////////////////
+                        client.writeMessage() catch |err| {
+                            std.debug.print("Write error: {any}\n", .{err});
+                            loom.closeClient(client);
+                        };
                     }
                 },
             }
@@ -346,6 +354,13 @@ pub fn enforceTimeout(self: *Loom) i32 {
 pub fn acceptConn(self: *Loom, listener: posix.socket_t) !void {
     var address: net.Address = undefined;
     var address_len: posix.socklen_t = @sizeOf(net.Address);
+
+    if (self.free_fiber_indices.items.len == 0) {
+        print("We Ran out of space (no free fibers)\n", .{});
+        try self.kqueue.removeListener(listener);
+        return; // Don't accept, just return
+    }
+
     // const space = self.max - self.connected;
     if (self.connected < self.max) {
         const socket = posix.accept(listener, &address.any, &address_len, posix.SOCK.NONBLOCK) catch |err| switch (err) {
@@ -371,6 +386,16 @@ pub fn acceptConn(self: *Loom, listener: posix.socket_t) !void {
             .data = client,
         };
 
+        // --- NEW LOGIC: ASSIGN FIBER ---
+        const pool_index = self.free_fiber_indices.pop() orelse {
+            self.kqueue.removeListener(listener) catch unreachable; // Get an available index
+            return error.NoFibersAvailable;
+        };
+        client.fiber_index = pool_index;
+        client.fiber = &self.fibers[pool_index];
+        client.stack = self.stacks[pool_index];
+        // --- END NEW LOGIC ---
+
         // self.read_timeout_list.append(&client.read_timeout_node.node);
         try self.kqueue.newClient(client);
         self.connected += 1;
@@ -386,10 +411,44 @@ pub fn readEvents(loom: *Loom, next_timeout: i32) ![]system.Kevent {
 }
 
 pub fn closeClient(self: *Loom, client: *Client) void {
-    self.read_timeout_list.remove(&client.read_timeout_node.node);
-    self.client_node_pool.destroy(client.read_timeout_node);
+    // --- NEW LOGIC: RETURN FIBER TO POOL ---
+    // We MUST reset the fiber before putting it back,
+    // in case it died with an error.
+    // if (client.fiber.?.f_status != .Start) {
+    //      Scheduler.resetFiber(
+    //         client.fiber.?,
+    //         client.stack.?,
+    //         handleCTX,
+    //     ) catch |e| {
+    //         log.err("Failed to reset fiber on close: {any}", .{e});
+    //         // Don't return to pool if reset failed?
+    //     };
+    // }
+
+    // Add the index back to the free list
+    self.free_fiber_indices.append(client.fiber_index) catch |err| {
+        // This is bad. We can't return the fiber.
+        log.err("CRITICAL: Failed to return fiber index {d} to pool: {any}", .{ client.fiber_index, err });
+    };
+    // --- END NEW LOGIC ---
+
+    // self.read_timeout_list.remove(&client.read_timeout_node.node);
+    // self.client_node_pool.destroy(client.read_timeout_node);
     client.deinit(self.arena.*);
     posix.close(client.socket);
     self.client_pool.destroy(client);
     self.connected -= 1;
+
+    // If we have space again, re-enable the listener
+    // // (This logic might need to be refined, but it's the right idea)
+    // if (self.free_fiber_indices.items.len > 0) {
+    //     try self.kqueue.addListener(listener); // 'listener' needs to be available here
+    // }
+
+    // self.read_timeout_list.remove(&client.read_timeout_node.node);
+    // self.client_node_pool.destroy(client.read_timeout_node);
+    // client.deinit(self.arena.*);
+    // posix.close(client.socket);
+    // self.client_pool.destroy(client);
+    // self.connected -= 1;
 }

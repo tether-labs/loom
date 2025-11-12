@@ -13,8 +13,8 @@ const posix = std.posix;
 
 pub const KQueue = @This();
 kfd: posix.fd_t = undefined,
-event_list: [1024]system.Kevent = undefined,
-change_list: [128]system.Kevent = undefined,
+event_list: [128]system.Kevent = undefined,
+change_list: [32]system.Kevent = undefined,
 change_count: usize = 0,
 
 pub fn init() !KQueue {
@@ -28,6 +28,19 @@ pub fn init() !KQueue {
 
 pub fn deinit(self: KQueue) void {
     posix.close(self.kfd);
+}
+
+fn queueChange(self: *KQueue, event: system.Kevent) !void {
+    // Here we take a new event and add it to the change_list
+    var count = self.change_count;
+    if (count == self.change_list.len) {
+        // our change_list batch is full, apply it
+        // This commits the batch change_list to the kqueue to watch these events;
+        _ = try posix.kevent(self.kfd, &self.change_list, &.{}, null);
+        count = 0;
+    }
+    self.change_list[count] = event;
+    self.change_count = count + 1;
 }
 
 pub fn wait(self: *KQueue, timeout_ms: i32) ![]system.Kevent {
@@ -94,10 +107,13 @@ pub fn newClient(self: *KQueue, client: *Client) !void {
 }
 
 pub fn readMode(self: *KQueue, client: *Client) !void {
+    if (client.socket < 0) {
+        return error.InvalidSocket;
+    }
     try self.queueChange(.{
         .ident = @intCast(client.socket),
         .filter = posix.system.EVFILT.WRITE,
-        .flags = posix.system.EV.DISABLE,
+        .flags = posix.system.EV.ADD | posix.system.EV.DISABLE,
         .fflags = 0,
         .data = 0,
         .udata = @intFromPtr(client), // <-- Always pass the correct pointer
@@ -105,7 +121,7 @@ pub fn readMode(self: *KQueue, client: *Client) !void {
     try self.queueChange(.{
         .ident = @intCast(client.socket),
         .filter = posix.system.EVFILT.READ,
-        .flags = posix.system.EV.ENABLE,
+        .flags = posix.system.EV.ADD | posix.system.EV.ENABLE,
         .fflags = 0,
         .data = 0,
         .udata = @intFromPtr(client),
@@ -113,10 +129,13 @@ pub fn readMode(self: *KQueue, client: *Client) !void {
 }
 
 pub fn writeMode(self: *KQueue, client: *Client) !void {
+    if (client.socket < 0) {
+        return error.InvalidSocket;
+    }
     try self.queueChange(.{
         .ident = @intCast(client.socket),
         .filter = posix.system.EVFILT.READ,
-        .flags = posix.system.EV.DISABLE,
+        .flags = posix.system.EV.ADD | posix.system.EV.DISABLE,
         .fflags = 0,
         .data = 0,
         .udata = @intFromPtr(client), // <-- Always pass the correct pointer
@@ -124,8 +143,8 @@ pub fn writeMode(self: *KQueue, client: *Client) !void {
 
     try self.queueChange(.{
         .ident = @intCast(client.socket),
-        .flags = posix.system.EV.ENABLE,
         .filter = posix.system.EVFILT.WRITE,
+        .flags = posix.system.EV.ADD | posix.system.EV.ENABLE,
         .fflags = 0,
         .data = 0,
         .udata = @intFromPtr(client),
@@ -149,15 +168,3 @@ pub fn flushChanges(self: *KQueue) !void {
     }
 }
 
-fn queueChange(self: *KQueue, event: system.Kevent) !void {
-    // Here we take a new event and add it to the change_list
-    var count = self.change_count;
-    if (count == self.change_list.len) {
-        // our change_list batch is full, apply it
-        // This commits the batch change_list to the kqueue to watch these events;
-        _ = try posix.kevent(self.kfd, &self.change_list, &.{}, null);
-        count = 0;
-    }
-    self.change_list[count] = event;
-    self.change_count = count + 1;
-}

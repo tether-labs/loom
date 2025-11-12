@@ -123,6 +123,52 @@ pub fn createFiber(func: anytype, args: anytype, stack: Stack) !*Fiber {
     fiber = try Fiber.init(func, args, stack);
     return fiber;
 }
+
+/// Resets a completed fiber so it can be run again.
+///
+/// This function re-initializes the fiber's stack frame and resets its
+/// status. It assumes the fiber's `func` will be called by the `Fiber.run`
+/// trampoline, similar to the `initFromStack` function.
+///
+/// # Parameters:
+/// - `target`: The completed fiber (must be in `.Done` state).
+/// - `stack`: The *original* stack slice associated with this fiber.
+/// - `func`: The function the fiber should run (e.g., `handleCTX`).
+/// - `storage`: Optional pointer to be stored in the fiber.
+pub fn resetFiber(
+    target: *Fiber,
+    stack: Stack,
+    func: *const fn () anyerror!void,
+    // storage: ?*anyopaque, // <-- REMOVE THIS ARG
+) !void {
+    utils.assert_cm(
+        target.f_status == Status.Done,
+        "Can only reset a fiber that is already completed",
+    );
+
+    const base_frame = base.Frame.init(&(Fiber.run), stack) catch |err| {
+        std.log.err("Could not re-init Frame, stack invalid {any}\n", .{err});
+        return err;
+    };
+    
+    // --- THIS IS THE FIX ---
+    // We must preserve the .id and .storage pointers.
+    // .storage points to InnerStorage, which is *still on the stack*
+    // and holds the arguments. We are just resetting the *state*.
+    const original_id = target.id;
+    const original_storage = target.storage;
+
+    target.* = Fiber{
+        .id = original_id,
+        .storage = original_storage, // <-- PRESERVE THIS
+        .f_status = .Start,
+        .f_frame = base_frame,
+        .func = func,
+        .caller = null,
+        .err = null, // Clear any previous error
+    };
+}
+
 /// Creates a Group of Fibers
 /// *Caller is responsible for calling free on the allocated slice of Fibers*
 /// # Parameters:

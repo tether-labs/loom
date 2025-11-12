@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <title>Tether</title>
+  <meta charset="utf-8" />
+  <meta name="google-site-verification" content="12aR_338F0VaglKbfvPLczdZV_Ej6AVx9Ef7M4ULfLU" />
+  <meta name="description"
+    content="Tether website includes documentation on all three components Fabric, Tether, and Treehouse. As well as instructions on installation and use cases." />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="icon" href="/assets/icon.svg" type="image/svg+xml" />
+  <!-- <link rel="preload" href="/zig-out/bin/vapor.wasm" as="fetch" type="application/wasm" crossorigin /> -->
+
+  <!-- Preconnect stays the same -->
+  <!-- <link href="https://fonts.googleapis.com" /> -->
+  <!-- <link href="https://fonts.gstatic.com" crossorigin /> -->
+  <!-- <link href="https://cdn.jsdelivr.net" crossorigin /> -->
+
+  <!-- Load fonts async with media trick -->
+  <!-- <link -->
+  <!--   href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:ital,wght@0,100..700;1,100..700&family=Montserrat:wght@400;700&display=swap" -->
+  <!--   rel="stylesheet" media="print" onload="this.media='all'" /> -->
+  <!-- <noscript> -->
+  <!--   <link -->
+  <!--     href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:ital,wght@0,100..700;1,100..700&family=Montserrat:wght@400;700&display=swap" -->
+  <!--     rel="stylesheet" /> -->
+  <!-- </noscript> -->
+  <!---->
+  <!-- <link rel="preload" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css" as="style" -->
+  <!--   onload="this.rel='stylesheet'" /> -->
+  <!-- <noscript> -->
+  <!--   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css" /> -->
+  <!-- </noscript> -->
+
+  <!-- <script type="module" src="/web/wasi_obj.js"></script> -->
+
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      font-family: Montserrat;
+      font-weight: 400;
+      height: 100vh;
+      width: 100%;
+      box-sizing: border-box;
+      flex-shrink: 0;
+      background-color: rgba(var(--background));
+      color: rgb(var(--text_color));
+      transition:
+        background-color 0.3s ease,
+        color 0.3s ease;
+      scrollbar-width: none;
+      /* Firefox */
+      -ms-overflow-style: none;
+      /* IE/Edge */
+    }
+
+    *,
+    *::before,
+    *::after {
+      box-sizing: border-box;
+      -webkit-tap-highlight-color: transparent;
+      -webkit-scrollbar: display: none;
+      scrollbar-width: none;
+      -ms-overflow-style: none;
+      /* Chrome, Safari, Opera */
+      margin: 0;
+    }
+
+
+    p,
+    h1,
+    h2,
+    h3,
+    h4,
+    h5,
+    h6 {
+      line-height: 1.5;
+      font-size-adjust: 0.5;
+    }
+
+    textarea {
+      line-height: 1.5;
+      font-size-adjust: 0.5;
+    }
+
+    table {
+      border-collapse: separate;
+      border-spacing: 0;
+    }
+
+    /* Basic sidebar styling */
+    .onthispage a {
+      text-decoration: none;
+      transition: all 0.3s ease;
+    }
+
+    /* This is the class we will toggle */
+    .onthispage a.active {
+      color: dodgerblue;
+      font-weight: bold;
+      transform: scale(1.1);
+    }
+
+    .stats {
+      position: fixed;
+      bottom: 10px;
+      right: 10px;
+      padding: 10px;
+      /* box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1); */
+      font-family: "IBM Plex Mono",monospace;
+      font-size: 12px;
+      z-index: 10000;
+      background-color: rgba(var(--background));
+      border: 1px solid rgba(var(--text_color));
+    }
+  </style>
+    <!-- <link rel="stylesheet" href="/static/style_variables.css" /> -->
+</head>
+
+<body>
+  <div class="stats" id="stats">
+    FPS: <span id="fps">0</span><br />
+    Frame Time: <span id="frameTime">0</span>ms<br />
+    Render Time: <span id="renderTime">0</span>ms<br />
+  </div>
+  <div id="contents" style="display: contents"></div>
+</body>
+
+</html>
