@@ -5,13 +5,17 @@ const resp = "HTTP/1.1 200 OK\r\nContent-Length: 10000000\r\n\r\n";
 const simple_resp = "HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nSUCCESS";
 var payload: []u8 = undefined;
 var allocator: std.mem.Allocator = undefined;
-var local_buffer: [8192]u8 = undefined;
-const xsuspend = loompkg.xsuspend;
-fn handle(client: *loompkg.Client, msg: []const u8) !void {
-    // ✅ GOOD: Capture immediately as local variables
-    const my_client = client;
-    _ = msg;
-    try my_client.chunked(payload);
+
+fn handle(client: *loompkg.Client, _: []const u8) !void {
+    var pos: usize = 0;
+    while (pos < payload.len) {
+        // Calculate how much we can fit in the buffer
+        const remaining = payload.len - pos;
+        const buffer_capacity = 4096;
+        const chunk_size = @min(remaining, buffer_capacity);
+        client.chunked(payload[pos .. pos + chunk_size]) catch return error.ChunkError;
+        pos += chunk_size;
+    }
 }
 
 pub fn makePayload(size: usize) ![]u8 {
