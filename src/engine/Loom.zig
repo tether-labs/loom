@@ -304,16 +304,16 @@ fn run(
                             handler_context.msg = msg;
 
                             //////////////////////////////////////////////////////////////////////////////////
-                            handleCTX() catch |err| {
-                                std.debug.print("Handler error: {any}\n", .{err});
+                            handleCTX() catch {
+                                // std.debug.print("Handler error: {any}\n", .{err});
                                 loom.closeClient(client);
                                 break;
                             };
                         }
                     } else if (filter == system.EVFILT.WRITE) {
                         //////////////////////////////////////////////////////////////////////////////////
-                        client.writeMessage() catch |err| {
-                            std.debug.print("Write error: {any}\n", .{err});
+                        client.writeMessage() catch {
+                            // std.debug.print("Write error: {any}\n", .{err});
                             loom.closeClient(client);
                         };
                     }
