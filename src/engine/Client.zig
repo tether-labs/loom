@@ -264,7 +264,7 @@ const Reader = struct {
 pub var writer_buf: []u8 = undefined;
 
 const Writer = struct {
-    buf: [8192]u8 = undefined,
+    buf: [8192 * 2]u8 = undefined,
     pos: usize = 0, // Current write position in buffer
     offset: usize = 0, // How much we've sent from the buffer
 

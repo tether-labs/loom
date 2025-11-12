@@ -150,7 +150,7 @@ pub fn resetFiber(
         std.log.err("Could not re-init Frame, stack invalid {any}\n", .{err});
         return err;
     };
-    
+
     // --- THIS IS THE FIX ---
     // We must preserve the .id and .storage pointers.
     // .storage points to InnerStorage, which is *still on the stack*
@@ -432,18 +432,61 @@ fn counterFunc() !void {
 }
 
 var counter: usize = 0;
+
+var payload: []u8 = undefined;
+fn handle(pos: *usize) !void {
+    while (pos.* < payload.len) {
+        // Calculate how much we can fit in the buffer
+        const remaining = payload.len - pos.*;
+        const buffer_capacity = 4096;
+        const chunk_size = @min(remaining, buffer_capacity);
+
+        pos.* += chunk_size;
+        xsuspend();
+    }
+    std.debug.print("Counter Func {any}\n", .{counter});
+    counter += 1;
+}
+
+pub fn makePayload(size: usize) ![]u8 {
+    const allocator = std.heap.page_allocator;
+    const buf = try allocator.alloc(u8, size);
+    @memset(buf, 'x');
+    return buf;
+}
+
 test "simple" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var allocator = arena.allocator();
+
     var scheduler: Scheduler = undefined;
     try scheduler.init(allocator);
-    const stack = try scheduler.stackAlloc(null);
-    defer allocator.free(stack);
-    var current_fiber: *Fiber = undefined;
-    current_fiber = try createFiber(counterFunc, .{}, stack);
+    payload = try allocator.alloc(u8, (10000000));
+    @memcpy(payload[0..(10000000)], try makePayload(10000000));
+
     // Start the callee coroutine
 
+    var fibers: []*Fiber = allocator.alloc(*Fiber, 10) catch unreachable;
+    var stacks: []Stack = allocator.alloc(Stack, 10) catch unreachable;
+
+    for (0..10) |i| {
+        const stack = try scheduler.stackAlloc(null);
+        const pos = allocator.create(usize) catch unreachable;
+        pos.* = 0;
+        const current_fiber = try createFiber(handle, .{pos}, stack);
+        fibers[i] = current_fiber;
+        stacks[i] = stack;
+    }
+
+
+
     while (counter < 10) {
-        xresume(current_fiber);
+        for (fibers[0..10]) |f| {
+            if (f.status() != .Done) {
+                xresume(f);
+            }
+        }
     }
 
     // try std.testing.expectEqual(counter, 1);
