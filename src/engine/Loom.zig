@@ -317,6 +317,7 @@ fn run(
 
                             handler_context.client = client;
                             handler_context.msg = msg;
+                            std.debug.print("Resuming fiber\n", .{});
                             xresume(client.fiber.?);
                         }
                     } else if (filter == system.EVFILT.WRITE) {
