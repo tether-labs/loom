@@ -28,6 +28,7 @@ msg: []const u8,
 
 // Used to write messages
 writer: Writer,
+reader: Reader,
 response: []const u8,
 
 // absolute time, in millisecond, when this client should timeout if
@@ -38,8 +39,8 @@ read_timeout: i64,
 read_timeout_node: *ClientNode,
 
 pub fn init(arena: Allocator, socket: posix.socket_t, address: std.net.Address, kqueue: *KQueue) !Client {
-    // const reader = try Reader.init(arena, 4096);
-    // errdefer reader.deinit(arena);
+    const reader = try Reader.init(arena, 4096);
+    errdefer reader.deinit(arena);
 
     const writer = try Writer.init(arena, 4096);
     errdefer writer.deinit(arena);
@@ -53,6 +54,7 @@ pub fn init(arena: Allocator, socket: posix.socket_t, address: std.net.Address, 
         .address = address,
         .msg = "",
         .writer = writer,
+        .reader = reader,
         .response = "",
         .read_timeout = 0, // let the server set this
         .read_timeout_node = undefined, // hack/ugly, let the server set this when init returns
@@ -142,28 +144,32 @@ pub fn findCRLFCRLF(payload: []const u8) ?usize {
 // pub var reader_buf: [2097152]u8 = [_]u8{0} ** 2097152;
 pub var reader_buf: []u8 = undefined;
 pub fn readMessage(self: *Client) ![]const u8 {
-    // return self.reader.readMessage(self.socket) catch |err| {
-    //     // try Loom.logger.err("Read msg {any}", .{err}, @src());
-    //     switch (err) {
-    //         error.WouldBlock => return null,
-    //         else => return err,
-    //     }
-    // };
+    return self.reader.readMessage(self.socket) catch |err| {
+        switch (err) {
+            error.WouldBlock => {
+                return error.WouldBlock;
+            },
+            error.BrokenPipe, error.ConnectionResetByPeer => {
+                return err;
+            },
+            else => return err,
+        }
+    };
 
-    const rv = try posix.read(self.socket, reader_buf);
-    if (rv == 0) {
-        return error.Closed;
-    }
-
-    // var end = buf[0..rv].len;
-    // std.debug.print("{s}\n", .{buf[0..rv]});
-    // if (buf[end - 1] != 10) {
-    //     // std.debug.print("H\n", .{});
-    //     end = findCRLFCRLF(buf[0..rv]).?;
-    //     // std.debug.print("{any}\n", .{end});
+    // const rv = try posix.read(self.socket, reader_buf);
+    // if (rv == 0) {
+    //     return error.Closed;
     // }
-
-    return reader_buf[0..rv];
+    //
+    // // var end = buf[0..rv].len;
+    // // std.debug.print("{s}\n", .{buf[0..rv]});
+    // // if (buf[end - 1] != 10) {
+    // //     // std.debug.print("H\n", .{});
+    // //     end = findCRLFCRLF(buf[0..rv]).?;
+    // //     // std.debug.print("{any}\n", .{end});
+    // // }
+    //
+    // return reader_buf[0..rv];
 }
 
 pub fn writeMessage(self: *Client) !void {
@@ -171,12 +177,11 @@ pub fn writeMessage(self: *Client) !void {
         switch (err) {
             error.WouldBlock => {
                 // Arm for WRITE notifications
-                return err;
+                try self.kqueue.writeMode(self);
+                xsuspend();
+                return;
             },
             error.BrokenPipe, error.ConnectionResetByPeer => {
-                // std.debug.print("client disconnected\n", .{});
-                // Client disconnected - DON'T try to resume
-                // Just return the error and let the event loop clean up
                 return err;
             },
             else => return err,
@@ -187,7 +192,7 @@ pub fn writeMessage(self: *Client) !void {
 
 pub fn chunked(self: *Client, payload: []const u8) !void {
     var pos: usize = 0;
-    outer: while (pos < payload.len) {
+    while (pos < payload.len) {
         // Calculate how much we can fit in the buffer
         const remaining = payload.len - pos;
         const buffer_capacity = self.writer.buf.len;
@@ -203,7 +208,8 @@ pub fn chunked(self: *Client, payload: []const u8) !void {
             self.writeMessage() catch |err| {
                 switch (err) {
                     error.WouldBlock => {
-                        continue :outer;
+                        try self.kqueue.writeMode(self);
+                        xsuspend();
                     },
                     else => {
                         return err;
@@ -225,16 +231,14 @@ pub fn fillWriteBuffer(self: *Client, msg: []const u8) !void {
 }
 
 const Reader = struct {
-    buf: [4096]u8 = [_]u8{0} ** 4096,
+    buf: [8192]u8 = undefined,
     pos: usize = 0,
-    start: usize = 0,
+    offset: usize = 0, // How much we've sent from the buffer
 
     pub fn init(_: Allocator, _: usize) !Reader {
-        // const buf = try arena.alloc(u8, size);
         return .{
             .pos = 0,
-            .start = 0,
-            // .buf = buf,
+            .offset = 0,
         };
     }
 
@@ -245,19 +249,41 @@ const Reader = struct {
     // !!!!!!!!!!!!!!!This process of adding is extremely heavy
     // self.pos += rv;
     pub fn readMessage(self: *Reader, socket: posix.socket_t) ![]u8 {
-        var buf = self.buf;
-        const start = self.start;
+        // var buf = self.buf;
+        // const start = self.start;
+        //
+        // const rv = try posix.read(socket, buf[start..]);
+        // if (rv == 0) {
+        //     return error.Closed;
+        // }
+        //
+        // self.pos = rv;
+        // std.debug.assert(self.pos >= start);
+        // const msg = buf[start..self.pos];
+        // self.start += msg.len;
+        // return msg;
 
-        const rv = try posix.read(socket, buf[start..]);
+        // if (self.offset >= self.pos) {
+        //     return;
+        // }
+
+        // Try to write remaining data
+        const rv = posix.read(socket, self.buf[0..]) catch |err| {
+            switch (err) {
+                error.WouldBlock => return error.WouldBlock,
+                else => return err,
+            }
+        };
+        self.pos = rv;
+        // std.debug.assert(self.pos >= self.offset);
+
         if (rv == 0) {
             return error.Closed;
         }
 
-        self.pos = rv;
-        std.debug.assert(self.pos >= start);
-        const msg = buf[start..self.pos];
-        self.start += msg.len;
-        return msg;
+        // Update how much we've sent
+        // self.offset += rv;
+        return self.buf[0..self.pos];
     }
 };
 

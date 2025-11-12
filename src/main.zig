@@ -1,7 +1,7 @@
 const std = @import("std");
 const loompkg = @import("loom");
 
-const resp = "HTTP/1.1 200 OK\r\nDate: Tue, 19 Aug 2025 18:37:36 GMT\r\nContent-Length: 7\r\nContent-Type: text/plain charset=utf-8\r\n\r\nSUCCESS";
+const resp = "HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nSUCCESS";
 var payload: []u8 = undefined;
 var allocator: std.mem.Allocator = undefined;
 var local_buffer: [8192]u8 = undefined;
@@ -27,7 +27,7 @@ pub fn main() !void {
         .server_addr = "0.0.0.0",
         .sticky_server = false,
         .server_port = 8080,
-        .max = 256,
+        .max = 512,
         .callback = handle,
     };
     var loom: loompkg.Loom = undefined;

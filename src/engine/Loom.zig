@@ -294,28 +294,43 @@ fn run(
                                     error.WouldBlock => {
                                         break;
                                     },
+                                    error.BrokenPipe, error.ConnectionResetByPeer, error.NotOpenForReading => {
+                                        loom.closeClient(client);
+                                        break;
+                                    },
                                     else => {
                                         loom.closeClient(client);
                                         break;
                                     },
                                 }
                             };
+
+                            const fiber = client.fiber.?;
+                            const stack = client.stack.?;
+
+                            if (fiber.status() == .Done) {
+                                Scheduler.resetFiber(fiber, stack, handleCTX) catch |e| {
+                                    log.err("Failed to reset fiber on close: {any}", .{e});
+                                    loom.closeClient(client);
+                                };
+                            }
+
                             handler_context.client = client;
                             handler_context.msg = msg;
-
-                            //////////////////////////////////////////////////////////////////////////////////
-                            handleCTX() catch |err| {
-                                std.debug.print("Handler error: {any}\n", .{err});
-                                loom.closeClient(client);
-                                break;
-                            };
+                            xresume(client.fiber.?);
                         }
                     } else if (filter == system.EVFILT.WRITE) {
-                        //////////////////////////////////////////////////////////////////////////////////
-                        client.writeMessage() catch |err| {
-                            std.debug.print("Write error: {any}\n", .{err});
-                            loom.closeClient(client);
-                        };
+                        if (client.fiber) |fiber| {
+                            if (fiber.status() != .Done) {
+                                xresume(fiber);
+                            } else {
+                                Scheduler.resetFiber(fiber, client.stack.?, handleCTX) catch |e| {
+                                    log.err("Failed to reset fiber on close: {any}", .{e});
+                                    loom.closeClient(client);
+                                    // Don't return to pool if reset failed?
+                                };
+                            }
+                        }
                     }
                 },
             }
