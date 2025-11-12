@@ -246,27 +246,7 @@ const Reader = struct {
         // arena.free(self.buf);
     }
 
-    // !!!!!!!!!!!!!!!This process of adding is extremely heavy
-    // self.pos += rv;
     pub fn readMessage(self: *Reader, socket: posix.socket_t) ![]u8 {
-        // var buf = self.buf;
-        // const start = self.start;
-        //
-        // const rv = try posix.read(socket, buf[start..]);
-        // if (rv == 0) {
-        //     return error.Closed;
-        // }
-        //
-        // self.pos = rv;
-        // std.debug.assert(self.pos >= start);
-        // const msg = buf[start..self.pos];
-        // self.start += msg.len;
-        // return msg;
-
-        // if (self.offset >= self.pos) {
-        //     return;
-        // }
-
         // Try to write remaining data
         const rv = posix.read(socket, self.buf[0..]) catch |err| {
             switch (err) {
@@ -275,14 +255,11 @@ const Reader = struct {
             }
         };
         self.pos = rv;
-        // std.debug.assert(self.pos >= self.offset);
 
         if (rv == 0) {
             return error.Closed;
         }
 
-        // Update how much we've sent
-        // self.offset += rv;
         return self.buf[0..self.pos];
     }
 };
@@ -290,7 +267,7 @@ const Reader = struct {
 pub var writer_buf: []u8 = undefined;
 
 const Writer = struct {
-    buf: [8192]u8 = undefined,
+    buf: [65536]u8 = undefined,
     pos: usize = 0, // Current write position in buffer
     offset: usize = 0, // How much we've sent from the buffer
 

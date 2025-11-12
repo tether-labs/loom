@@ -150,7 +150,9 @@ pub const Config = struct {
 const resp = "HTTP/1.1 200 OK\r\nDate: Tue, 19 Aug 2025 18:37:36 GMT\r\nContent-Length: 7\r\nContent-Type: text/plain charset=utf-8\r\n\r\nSUCCESS";
 
 fn handleCTX() !void {
-    try callback(handler_context.client, handler_context.msg);
+    const msg = handler_context.msg;
+    const client = handler_context.client;
+    try callback(client, msg);
 }
 
 /// This is the Cors struct default set to null
@@ -317,7 +319,7 @@ fn run(
 
                             handler_context.client = client;
                             handler_context.msg = msg;
-                            std.debug.print("Resuming fiber\n", .{});
+                            // std.debug.print("Resuming fiber\n", .{});
                             xresume(client.fiber.?);
                         }
                     } else if (filter == system.EVFILT.WRITE) {
@@ -331,6 +333,8 @@ fn run(
                                     // Don't return to pool if reset failed?
                                 };
                             }
+                        } else {
+                            loom.closeClient(client);
                         }
                     }
                 },
