@@ -2,6 +2,7 @@ const std = @import("std");
 const loompkg = @import("loom");
 
 const resp = "HTTP/1.1 200 OK\r\nContent-Length: 10000000\r\n\r\n";
+const simple_resp = "HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nSUCCESS";
 var payload: []u8 = undefined;
 var allocator: std.mem.Allocator = undefined;
 var local_buffer: [8192]u8 = undefined;

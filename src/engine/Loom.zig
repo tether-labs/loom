@@ -170,14 +170,12 @@ pub fn new(target: *Loom, config: Config, arena: *Allocator) !void {
     var kqueue = try KQueue.init();
     errdefer kqueue.deinit();
 
-    var io: Io = undefined;
-    io.init(arena, &kqueue);
-
     const stacks = try arena.alloc(Stack, config.max);
     const fibers = try arena.alloc(Fiber, config.max);
     for (0..config.max) |i| {
         stacks[i] = try scheduler.stackAlloc(1024);
-        const fiber = try createFiber(handleCTX, .{}, stacks[i]);
+        var fiber = try arena.create(Fiber);
+        fiber = try createFiber(handleCTX, .{}, stacks[i]);
         fibers[i] = fiber.*;
     }
 
@@ -206,15 +204,12 @@ pub fn new(target: *Loom, config: Config, arena: *Allocator) !void {
         .scheduler = scheduler,
         .kqueue = kqueue,
         .stacks = stacks,
-        .io = io,
         .max_body_size = config.max_body_size,
         .fibers = fibers,
         .free_fiber_indices = free_list,
         // .current_fiber = fiber,
     };
 
-    Client.writer_buf = try arena.alloc(u8, config.max_body_size);
-    Client.reader_buf = try arena.alloc(u8, config.max_read_size);
     callback = config.callback;
     errdefer arena.free(Client.writer_buf);
 }
@@ -278,6 +273,7 @@ fn run(
                 0 => {
                     while (true) {
                         loom.acceptConn(listener) catch |err| switch (err) {
+                            error.RemovedListener => return,
                             error.WouldBlock => break, // No more connections waiting, break inner loop
                             else => |e| log.err("accept error: {}", .{e}),
                         };
@@ -319,20 +315,17 @@ fn run(
 
                             handler_context.client = client;
                             handler_context.msg = msg;
-                            // std.debug.print("Resuming fiber\n", .{});
-                            xresume(client.fiber.?);
+                            xresume(fiber);
                         }
                     } else if (filter == system.EVFILT.WRITE) {
                         if (client.fiber) |fiber| {
-                            if (fiber.status() != .Done) {
-                                xresume(fiber);
-                            } else {
+                            if (fiber.status() == .Done) {
                                 Scheduler.resetFiber(fiber, client.stack.?, handleCTX) catch |e| {
                                     log.err("Failed to reset fiber on close: {any}", .{e});
                                     loom.closeClient(client);
-                                    // Don't return to pool if reset failed?
                                 };
                             }
+                            xresume(fiber);
                         } else {
                             loom.closeClient(client);
                         }
@@ -377,8 +370,11 @@ pub fn acceptConn(self: *Loom, listener: posix.socket_t) !void {
 
     if (self.free_fiber_indices.items.len == 0) {
         print("We Ran out of space (no free fibers)\n", .{});
-        try self.kqueue.removeListener(listener);
-        return; // Don't accept, just return
+        self.kqueue.removeListener(listener) catch {
+            std.debug.print("Failed to remove listener\n", .{});
+            return error.FailedToRemoveListener;
+        };
+        return error.RemovedListener; // Don't accept, just return
     }
 
     // const space = self.max - self.connected;
@@ -431,44 +427,22 @@ pub fn readEvents(loom: *Loom, next_timeout: i32) ![]system.Kevent {
 }
 
 pub fn closeClient(self: *Loom, client: *Client) void {
-    // --- NEW LOGIC: RETURN FIBER TO POOL ---
-    // We MUST reset the fiber before putting it back,
-    // in case it died with an error.
-    // if (client.fiber.?.f_status != .Start) {
-    //      Scheduler.resetFiber(
-    //         client.fiber.?,
-    //         client.stack.?,
-    //         handleCTX,
-    //     ) catch |e| {
-    //         log.err("Failed to reset fiber on close: {any}", .{e});
-    //         // Don't return to pool if reset failed?
-    //     };
-    // }
-
-    // Add the index back to the free list
     self.free_fiber_indices.append(client.fiber_index) catch |err| {
         // This is bad. We can't return the fiber.
         log.err("CRITICAL: Failed to return fiber index {d} to pool: {any}", .{ client.fiber_index, err });
     };
-    // --- END NEW LOGIC ---
-
-    // self.read_timeout_list.remove(&client.read_timeout_node.node);
-    // self.client_node_pool.destroy(client.read_timeout_node);
     client.deinit(self.arena.*);
     posix.close(client.socket);
     self.client_pool.destroy(client);
-    self.connected -= 1;
+    if (self.connected > 0) self.connected -= 1;
+}
 
-    // If we have space again, re-enable the listener
-    // // (This logic might need to be refined, but it's the right idea)
-    // if (self.free_fiber_indices.items.len > 0) {
-    //     try self.kqueue.addListener(listener); // 'listener' needs to be available here
-    // }
-
-    // self.read_timeout_list.remove(&client.read_timeout_node.node);
-    // self.client_node_pool.destroy(client.read_timeout_node);
-    // client.deinit(self.arena.*);
-    // posix.close(client.socket);
-    // self.client_pool.destroy(client);
-    // self.connected -= 1;
+pub fn closeClientNoopPosix(self: *Loom, client: *Client) void {
+    self.free_fiber_indices.append(client.fiber_index) catch |err| {
+        // This is bad. We can't return the fiber.
+        log.err("CRITICAL: Failed to return fiber index {d} to pool: {any}", .{ client.fiber_index, err });
+    };
+    client.deinit(self.arena.*);
+    self.client_pool.destroy(client);
+    if (self.connected > 0) self.connected -= 1;
 }

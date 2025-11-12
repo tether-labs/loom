@@ -38,12 +38,7 @@ read_timeout: i64,
 // Node containing this client in the server's read_timeout_list
 read_timeout_node: *ClientNode,
 
-pub fn init(arena: Allocator, socket: posix.socket_t, address: std.net.Address, kqueue: *KQueue) !Client {
-    const reader = try Reader.init(arena, 4096);
-    errdefer reader.deinit(arena);
-
-    const writer = try Writer.init(arena, 4096);
-    errdefer writer.deinit(arena);
+pub fn init(_: Allocator, socket: posix.socket_t, address: std.net.Address, kqueue: *KQueue) !Client {
 
     // const write_buf = try arena.alloc(u8, 4096);
     // errdefer arena.free(write_buf);
@@ -53,8 +48,8 @@ pub fn init(arena: Allocator, socket: posix.socket_t, address: std.net.Address, 
         .socket = socket,
         .address = address,
         .msg = "",
-        .writer = writer,
-        .reader = reader,
+        .writer = .{},
+        .reader = .{},
         .response = "",
         .read_timeout = 0, // let the server set this
         .read_timeout_node = undefined, // hack/ugly, let the server set this when init returns
@@ -177,6 +172,7 @@ pub fn writeMessage(self: *Client) !void {
         switch (err) {
             error.WouldBlock => {
                 // Arm for WRITE notifications
+                // std.debug.print("ARMMing WRITE\n", .{});
                 try self.kqueue.writeMode(self);
                 xsuspend();
                 return;
@@ -206,15 +202,7 @@ pub fn chunked(self: *Client, payload: []const u8) !void {
         // Keep trying to write this chunk until complete
         while (true) {
             self.writeMessage() catch |err| {
-                switch (err) {
-                    error.WouldBlock => {
-                        try self.kqueue.writeMode(self);
-                        xsuspend();
-                    },
-                    else => {
-                        return err;
-                    },
-                }
+                return err;
             };
             // Write completed, move to next chunk
             break;
@@ -235,7 +223,7 @@ const Reader = struct {
     pos: usize = 0,
     offset: usize = 0, // How much we've sent from the buffer
 
-    pub fn init(_: Allocator, _: usize) !Reader {
+    pub fn init() !Reader {
         return .{
             .pos = 0,
             .offset = 0,
