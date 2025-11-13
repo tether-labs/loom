@@ -171,7 +171,69 @@ pub fn writeMessage(self: *Client) !void {
     return; // This is the success (void) case
 }
 
-pub fn chunked(self: *Client, payload: *const []const u8) !void {
+pub fn sendFile(client: *Client, file: std.fs.File) !void {
+    var pos: usize = 0;
+    const stat = try file.stat();
+    const size = stat.size;
+    var buf: [8192]u8 = client.writer.buf[0..8192].*;
+    while (pos < size) {
+        // Calculate how much we can fit in the buffer
+        // const remaining = size - pos;
+        // const buffer_capacity = client.writer.buf.len;
+        // const chunk_size = @min(remaining, buffer_capacity);
+
+        // Wait until the writer buffer is free before filling it.
+        if (!client.writer.isComplete()) {
+            // Writer still sending previous data: keep driving it until complete.
+            while (!client.writer.isComplete()) {
+                // Will suspend if socket isn't writable.
+                try client.writeMessage(); // propagates other errors
+            }
+            // At this point writer is complete (pos/offset reset).
+        }
+
+        // Now writer buffer is empty; copy next chunk into it.
+        const n = try file.read(buf[0..]);
+        try client.fillWriteBuffer(buf[0..n]);
+
+        // Keep trying to write this chunk until complete
+        while (!client.writer.isComplete()) {
+            try client.writeMessage(); // will internally arm WRITE and xsuspend on EAGAIN
+        }
+
+        // When the writer is fully flushed, advance the payload cursor.
+        pos += n;
+    }
+
+    // var buf: [8192]u8 = client.writer.buf[0..8192].*;
+    // while (true) {
+    //     const n = try file.read(buf[0..]);
+    //     if (n == 0) break;
+    //
+    //     var sent: usize = 0;
+    //     while (sent < n) {
+    //         const w = posix.write(client.socket, buf[sent..n]) catch |err| switch (err) {
+    //             error.WouldBlock => {
+    //                 // suspend here (your coroutine yield point)
+    //                 xsuspend();
+    //                 continue;
+    //             },
+    //             error.BrokenPipe => return, // client gone
+    //             else => return err,
+    //         };
+    //         sent += w;
+    //     }
+    // }
+}
+
+pub fn write(self: *Client, msg: []const u8) !void {
+    try self.fillWriteBuffer(msg);
+    while (!self.writer.isComplete()) {
+        try self.writeMessage(); // will internally arm WRITE and xsuspend on EAGAIN
+    }
+}
+
+pub fn chunked(self: *Client, payload: []const u8) !void {
     var pos: usize = 0;
     while (pos < payload.len) {
         // Calculate how much we can fit in the buffer
@@ -190,7 +252,7 @@ pub fn chunked(self: *Client, payload: *const []const u8) !void {
         }
 
         // Now writer buffer is empty; copy next chunk into it.
-        try self.fillWriteBuffer(payload.*[pos .. pos + chunk_size]);
+        try self.fillWriteBuffer(payload[pos .. pos + chunk_size]);
 
         // Keep trying to write this chunk until complete
         while (!self.writer.isComplete()) {

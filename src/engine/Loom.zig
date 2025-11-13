@@ -173,7 +173,7 @@ pub fn new(target: *Loom, config: Config, arena: *Allocator) !void {
     const stacks = try arena.alloc(Stack, config.max);
     const fibers = try arena.alloc(Fiber, config.max);
     for (0..config.max) |i| {
-        stacks[i] = try scheduler.stackAlloc(8 * 1024);
+        stacks[i] = try scheduler.stackAlloc(65536);
         var fiber = try arena.create(Fiber);
         fiber = try createFiber(handleCTX, .{}, stacks[i]);
         fibers[i] = fiber.*;
