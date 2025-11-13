@@ -185,6 +185,52 @@ pub fn writeMessage(self: *Client) !void {
     return; // This is the success (void) case
 }
 
+pub fn sendFile(client: *Client, file: std.fs.File) !void {
+    var pos: usize = 0;
+    const stat = try file.stat();
+    const size = stat.size;
+    var buf: [8192]u8 = client.writer.buf[0..8192].*;
+    outer: while (pos < size) {
+        // Fill the write buffer with the chunk
+        const n = try file.read(buf[0..]);
+        try client.fillWriteBuffer(buf[0..n]);
+        // Keep trying to write this chunk until complete
+        while (true) {
+            client.writeMessage() catch |err| {
+                switch (err) {
+                    error.WouldBlock => {
+                        continue :outer;
+                    },
+                    else => {
+                        return err;
+                    },
+                }
+            };
+            // Write completed, move to next chunk
+            break;
+        } // When the writer is fully flushed, advance the payload cursor.
+        pos += n;
+    }
+}
+
+pub fn write(self: *Client, msg: []const u8) !void {
+    try self.fillWriteBuffer(msg);
+    while (true) {
+        self.writeMessage() catch |err| {
+            switch (err) {
+                error.WouldBlock => {
+                    continue;
+                },
+                else => {
+                    return err;
+                },
+            }
+        };
+        // Write completed, move to next chunk
+        break;
+    }
+}
+
 pub fn chunked(self: *Client, payload: []const u8) !void {
     var pos: usize = 0;
     outer: while (pos < payload.len) {
