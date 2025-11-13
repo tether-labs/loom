@@ -1,21 +1,13 @@
 const std = @import("std");
 const loompkg = @import("loom");
 
-const resp = "HTTP/1.1 200 OK\r\nContent-Length: 10000000\r\n\r\n";
+const resp = "HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\n\r\n";
 const simple_resp = "HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nSUCCESS";
 var payload: []u8 = undefined;
 var allocator: std.mem.Allocator = undefined;
 
 fn handle(client: *loompkg.Client, _: []const u8) !void {
-    var pos: usize = 0;
-    while (pos < payload.len) {
-        // Calculate how much we can fit in the buffer
-        const remaining = payload.len - pos;
-        const buffer_capacity = 4096;
-        const chunk_size = @min(remaining, buffer_capacity);
-        client.chunked(payload[pos .. pos + chunk_size]) catch return error.ChunkError;
-        pos += chunk_size;
-    }
+    client.chunked(&payload[0..]) catch return error.ChunkError;
 }
 
 pub fn makePayload(size: usize) ![]u8 {
@@ -27,29 +19,9 @@ pub fn makePayload(size: usize) ![]u8 {
 pub fn main() !void {
     allocator = std.heap.page_allocator;
 
-    payload = try allocator.alloc(u8, (resp.len + 10000000));
+    payload = try allocator.alloc(u8, (resp.len + 1000000));
     @memcpy(payload[0..resp.len], resp);
-    @memcpy(payload[resp.len..(resp.len + 10000000)], try makePayload(10000000));
-
-    // var file = try std.fs.cwd().openFile("./index.html", .{ .mode = .read_only });
-    // const stat = try file.stat();
-    // defer file.close();
-    // const index = file.readToEndAlloc(allocator, stat.size) catch unreachable;
-    // const httpHead =
-    //     "HTTP/1.1 200 OK \r\n" ++
-    //     "Connection: close\r\n" ++
-    //     "Access-Control-Allow-Origin: *\r\n" ++
-    //     "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n" ++
-    //     "Access-Control-Allow-Headers: Content-Type, Authorization\r\n" ++
-    //     // "Cache-Control: public, max-age=31536000, immutable\r\n" ++
-    //     "Content-Type: {s}\r\n" ++
-    //     "Content-Length: {}\r\n" ++
-    //     "\r\n" ++
-    //     "{s}";
-    // const response = try std.fmt.allocPrint(allocator, httpHead, .{ "text/html", index.len, index });
-    // defer allocator.free(response);
-    // payload = response;
-
+    @memcpy(payload[resp.len..(resp.len + 1000000)], try makePayload(1000000));
     const config = loompkg.Loom.Config{
         .server_addr = "0.0.0.0",
         .sticky_server = false,

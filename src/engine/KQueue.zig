@@ -157,14 +157,37 @@ pub fn addEventRaw(self: *KQueue, event: system.Kevent) !void {
 
 // In your KQueue struct:
 pub fn flushChanges(self: *KQueue) !void {
-    if (self.change_count > 0) {
-        _ = try posix.kevent(
-            self.kfd,
-            self.change_list[0..self.change_count],
-            &.{}, // No events to receive
-            null, // No timeout
-        );
-        self.change_count = 0;
-    }
+    if (self.change_count == 0) return;
+
+    const slice = self.change_list[0..self.change_count];
+    // pass changes; don't ask for events to be returned
+    _ = try posix.kevent(self.kfd, slice, &.{}, null);
+    self.change_count = 0;
 }
 
+pub fn deregister(self: *KQueue, sock: posix.socket_t) !void {
+    if (sock < 0) return;
+
+    // Remove read filter
+    try self.queueChange(.{
+        .ident = @intCast(sock),
+        .filter = posix.system.EVFILT.READ,
+        .flags = posix.system.EV.DELETE,
+        .fflags = 0,
+        .data = 0,
+        .udata = 0,
+    });
+
+    // Remove write filter
+    try self.queueChange(.{
+        .ident = @intCast(sock),
+        .filter = posix.system.EVFILT.WRITE,
+        .flags = posix.system.EV.DELETE,
+        .fflags = 0,
+        .data = 0,
+        .udata = 0,
+    });
+
+    // Ensure we apply immediately so kernel no longer has the fd registered
+    try self.flushChanges();
+}

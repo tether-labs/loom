@@ -173,7 +173,7 @@ pub fn new(target: *Loom, config: Config, arena: *Allocator) !void {
     const stacks = try arena.alloc(Stack, config.max);
     const fibers = try arena.alloc(Fiber, config.max);
     for (0..config.max) |i| {
-        stacks[i] = try scheduler.stackAlloc(1024);
+        stacks[i] = try scheduler.stackAlloc(8 * 1024);
         var fiber = try arena.create(Fiber);
         fiber = try createFiber(handleCTX, .{}, stacks[i]);
         fibers[i] = fiber.*;
@@ -273,7 +273,6 @@ fn run(
                 0 => {
                     while (true) {
                         loom.acceptConn(listener) catch |err| switch (err) {
-                            error.RemovedListener => return,
                             error.WouldBlock => break, // No more connections waiting, break inner loop
                             else => |e| log.err("accept error: {}", .{e}),
                         };
@@ -374,7 +373,7 @@ pub fn acceptConn(self: *Loom, listener: posix.socket_t) !void {
             std.debug.print("Failed to remove listener\n", .{});
             return error.FailedToRemoveListener;
         };
-        return error.RemovedListener; // Don't accept, just return
+        return; // Don't accept, just return
     }
 
     // const space = self.max - self.connected;
@@ -431,10 +430,28 @@ pub fn closeClient(self: *Loom, client: *Client) void {
         // This is bad. We can't return the fiber.
         log.err("CRITICAL: Failed to return fiber index {d} to pool: {any}", .{ client.fiber_index, err });
     };
-    client.deinit(self.arena.*);
-    posix.close(client.socket);
-    self.client_pool.destroy(client);
-    if (self.connected > 0) self.connected -= 1;
+    defer client.deinit(self.arena.*);
+    defer self.client_pool.destroy(client);
+    // if (self.connected > 0) self.connected -= 1;
+
+    const fd = client.socket;
+    if (fd < 0) return; // already closed
+
+    // Prevent further usage by other code paths
+    client.socket = -1;
+
+    // 1) remove from kqueue immediately and flush
+    self.kqueue.deregister(fd) catch unreachable;
+
+    // 2) cancel or wake any suspended fiber for this client
+    // if (client.fiber) |f| {
+    //     // Set some cancel flag on the fiber or call scheduler cancel
+    //     // Scheduler.cancelFiber(f); // implement cancel to wake fiber with error
+    //     client.fiber = null; // clear stored handle so no double operations
+    // }
+
+    // 3) close and ignore EBADF
+    posix.close(fd);
 }
 
 pub fn closeClientNoopPosix(self: *Loom, client: *Client) void {

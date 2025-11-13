@@ -150,21 +150,6 @@ pub fn readMessage(self: *Client) ![]const u8 {
             else => return err,
         }
     };
-
-    // const rv = try posix.read(self.socket, reader_buf);
-    // if (rv == 0) {
-    //     return error.Closed;
-    // }
-    //
-    // // var end = buf[0..rv].len;
-    // // std.debug.print("{s}\n", .{buf[0..rv]});
-    // // if (buf[end - 1] != 10) {
-    // //     // std.debug.print("H\n", .{});
-    // //     end = findCRLFCRLF(buf[0..rv]).?;
-    // //     // std.debug.print("{any}\n", .{end});
-    // // }
-    //
-    // return reader_buf[0..rv];
 }
 
 pub fn writeMessage(self: *Client) !void {
@@ -186,7 +171,7 @@ pub fn writeMessage(self: *Client) !void {
     return; // This is the success (void) case
 }
 
-pub fn chunked(self: *Client, payload: []const u8) !void {
+pub fn chunked(self: *Client, payload: *const []const u8) !void {
     var pos: usize = 0;
     while (pos < payload.len) {
         // Calculate how much we can fit in the buffer
@@ -194,26 +179,32 @@ pub fn chunked(self: *Client, payload: []const u8) !void {
         const buffer_capacity = self.writer.buf.len;
         const chunk_size = @min(remaining, buffer_capacity);
 
-        // Fill the write buffer with the chunk
-        self.fillWriteBuffer(payload[pos .. pos + chunk_size]) catch {
-            // std.debug.print("Fill write buffer error: {any}\n", .{err});
-        };
+        // Wait until the writer buffer is free before filling it.
+        if (!self.writer.isComplete()) {
+            // Writer still sending previous data: keep driving it until complete.
+            while (!self.writer.isComplete()) {
+                // Will suspend if socket isn't writable.
+                try self.writeMessage(); // propagates other errors
+            }
+            // At this point writer is complete (pos/offset reset).
+        }
+
+        // Now writer buffer is empty; copy next chunk into it.
+        try self.fillWriteBuffer(payload.*[pos .. pos + chunk_size]);
 
         // Keep trying to write this chunk until complete
-        while (true) {
-            self.writeMessage() catch |err| {
-                return err;
-            };
-            // Write completed, move to next chunk
-            break;
+        while (!self.writer.isComplete()) {
+            try self.writeMessage(); // will internally arm WRITE and xsuspend on EAGAIN
         }
+
+        // When the writer is fully flushed, advance the payload cursor.
         pos += chunk_size;
     }
 }
 
 pub fn fillWriteBuffer(self: *Client, msg: []const u8) !void {
     self.writer.fillWriteBuffer(msg) catch |err| {
-        try Loom.logger.err("Fill write buffer {any}", .{err}, @src());
+        // try Loom.logger.err("Fill write buffer {any}", .{err}, @src());
         return err;
     };
 }
@@ -237,11 +228,14 @@ const Reader = struct {
     pub fn readMessage(self: *Reader, socket: posix.socket_t) ![]u8 {
         // Try to write remaining data
         const rv = posix.read(socket, self.buf[0..]) catch |err| {
+            // treat EBADF/NotOpenForReading as closed
             switch (err) {
+                error.NotOpenForReading => return error.Closed,
                 error.WouldBlock => return error.WouldBlock,
                 else => return err,
             }
         };
+
         self.pos = rv;
 
         if (rv == 0) {
@@ -270,13 +264,20 @@ const Writer = struct {
 
     pub fn fillWriteBuffer(self: *Writer, msg: []const u8) !void {
         // Check if we have space (optional safety check)
-        if (self.pos + msg.len > self.buf.len) {
-            return error.BufferFull;
+        // if (self.pos + msg.len > self.buf.len) {
+        //     return error.BufferFull;
+        // }
+        if (self.pos != 0 or self.offset != 0) {
+            return error.BufferBusy; // caller must wait until current buffer is drained
         }
+        if (msg.len > self.buf.len) return error.BufferFull;
 
         // Copy data into buffer at current position
-        @memcpy(self.buf[self.pos..][0..msg.len], msg);
-        self.pos += msg.len;
+        // @memcpy(self.buf[self.pos..][0..msg.len], msg);
+        // self.pos += msg.len;
+        @memcpy(self.buf[0..msg.len], msg);
+        self.pos = msg.len;
+        self.offset = 0;
     }
 
     pub fn writeMessage(self: *Writer, socket: posix.socket_t) !void {
@@ -288,6 +289,7 @@ const Writer = struct {
         // Try to write remaining data
         const wv = posix.write(socket, self.buf[self.offset..self.pos]) catch |err| {
             switch (err) {
+                error.NotOpenForWriting => return error.Closed,
                 error.WouldBlock => return error.WouldBlock,
                 else => return err,
             }
