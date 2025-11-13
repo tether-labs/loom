@@ -7,11 +7,11 @@ var payload: []u8 = undefined;
 var allocator: std.mem.Allocator = undefined;
 
 fn handle(client: *loompkg.Client, _: []const u8) !void {
-    const file = try std.fs.cwd().openFile("./index.html", .{});
-    defer file.close();
-    client.sendFile(file, &allocator) catch return error.ChunkError;
-
-    // client.chunked(&payload[0..]) catch return error.ChunkError;
+    client.write(simple_resp) catch return error.ChunkError;
+    // const file = try std.fs.cwd().openFile("./index.html", .{});
+    // defer file.close();
+    // client.sendFile(file, &allocator) catch return error.ChunkError;
+    // // client.chunked(&payload[0..]) catch return error.ChunkError;
 }
 
 pub fn makePayload(size: usize) ![]u8 {
