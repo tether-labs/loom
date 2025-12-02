@@ -386,6 +386,9 @@ pub fn acceptConn(self: *Loom, listener: posix.socket_t) !void {
             .data = client,
         };
 
+        client.state = .Connected;
+        client.client_type = .HTTP;
+
         // --- NEW LOGIC: ASSIGN FIBER ---
         const pool_index = self.free_fiber_indices.pop() orelse {
             self.kqueue.removeListener(listener) catch unreachable; // Get an available index

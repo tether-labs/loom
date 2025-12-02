@@ -4,3 +4,4 @@ pub const Loom = @import("engine/Loom.zig");
 pub const Client = @import("engine/Client.zig");
 pub const Scheduler = @import("engine/async/Scheduler.zig");
 pub const xsuspend = Loom.xsuspend;
+pub const WebSocket = @import("engine/Websocket.zig");

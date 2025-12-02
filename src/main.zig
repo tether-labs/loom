@@ -1,16 +1,13 @@
 const std = @import("std");
 const loompkg = @import("loom");
 
-const resp = "HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nSUCCESS";
+const resp = "HTTP/1.1 200 OK\r\nDate: Fri, 31 Dec 1999 23:59:59 GMT\r\nServer: Loom\r\nContent-Length: 7\r\n\r\nSUCCESS";
 var payload: []u8 = undefined;
 var allocator: std.mem.Allocator = undefined;
 var local_buffer: [8192]u8 = undefined;
 const xsuspend = loompkg.xsuspend;
-fn handle(client: *loompkg.Client, msg: []const u8) !void {
-    // ✅ GOOD: Capture immediately as local variables
-    const my_client = client;
-    _ = msg;
-    try my_client.chunked(resp);
+fn handle(client: *loompkg.Client, _: []const u8) !void {
+    try client.write(resp);
 }
 
 pub fn makePayload(size: usize) ![]u8 {
